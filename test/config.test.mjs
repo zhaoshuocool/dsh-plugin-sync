@@ -11,6 +11,7 @@ test('Config applies every default to an empty object', () => {
 		branch: 'main',
 		pullIntervalMs: 300000,
 		machineName: os.hostname(),
+		proxy: null,
 	});
 });
 
@@ -77,4 +78,18 @@ test('Config.parse matches the callable form and errors carry paths', () => {
 	}
 	assert.ok(caught);
 	assert.equal(caught.issues[0].path[0], 'branch');
+});
+
+test('Config keeps a proxy URL and clears it on empty or null', () => {
+	assert.equal(Config({ proxy: 'http://127.0.0.1:10808' }).proxy, 'http://127.0.0.1:10808');
+	assert.equal(Config({ proxy: '  http://127.0.0.1:10808/ ' }).proxy, 'http://127.0.0.1:10808', 'trimmed, trailing slash dropped');
+	assert.equal(Config({ proxy: 'socks5://127.0.0.1:1080' }).proxy, 'socks5://127.0.0.1:1080');
+	assert.equal(Config({ proxy: '' }).proxy, null, 'an empty string means no proxy');
+	assert.equal(Config({ proxy: null }).proxy, null);
+});
+
+test('Config rejects anything that is not a proxy URL', () => {
+	for (const proxy of ['127.0.0.1:10808', 'ftp://127.0.0.1:21', 'http://', 'not a url', 10808]) {
+		assert.throws(() => Config({ proxy }), /proxy/, String(proxy));
+	}
 });

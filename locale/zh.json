@@ -28,6 +28,8 @@
   "configTitle": "配置",
   "repoLabel": "仓库",
   "branchLabel": "分支",
+  "proxyLabel": "代理",
+  "proxyPlaceholder": "留空 = 不走代理，例如 http://127.0.0.1:10808",
   "intervalLabel": "拉取间隔",
   "minUnit": "分钟",
   "configHint": "保存后写入本配置档案的 cordis.patch.yml，立即生效。",

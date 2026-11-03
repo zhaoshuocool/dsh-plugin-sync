@@ -48,6 +48,8 @@ window.__ModuleLoader__.load({
         configTitle: 'Configuration',
         repoLabel: 'Repository',
         branchLabel: 'Branch',
+        proxyLabel: 'Proxy',
+        proxyPlaceholder: 'blank = no proxy, e.g. http://127.0.0.1:10808',
         intervalLabel: 'Pull interval',
         minUnit: 'min',
         configHint: 'Saved changes are written to this profile’s cordis.patch.yml and take effect immediately.',
@@ -96,6 +98,8 @@ window.__ModuleLoader__.load({
         configTitle: '配置',
         repoLabel: '仓库',
         branchLabel: '分支',
+        proxyLabel: '代理',
+        proxyPlaceholder: '留空 = 不走代理，例如 http://127.0.0.1:10808',
         intervalLabel: '拉取间隔',
         minUnit: '分钟',
         configHint: '保存后写入本配置档案的 cordis.patch.yml，立即生效。',
@@ -141,8 +145,17 @@ window.__ModuleLoader__.load({
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body ?? {}),
       });
-      if (!response.ok) throw new Error('http-' + response.status);
-      return response.json();
+      // A rejected action still answers with { ok: false, error }, and that
+      // text is the only clue this page has: read the body whenever there is
+      // one, and only fall back to the bare status for a bodyless failure.
+      let result = null;
+      try {
+        result = await response.json();
+      } catch {
+        result = null;
+      }
+      if (result === null && !response.ok) throw new Error('http-' + response.status);
+      return result ?? {};
     }
 
     const styles = {
@@ -284,7 +297,7 @@ window.__ModuleLoader__.load({
           try {
             const result = await postAction(url, body);
             if (result && result.ok === false) {
-              setError(t('opFailed'));
+              setError(result.error ? String(result.error) : t('opFailed'));
             } else if (result && result.outcome) {
               setNotice(result.outcome.errors && result.outcome.errors.length > 0
                 ? { kind: 'warn', text: t('resultPartial') }
@@ -307,6 +320,7 @@ window.__ModuleLoader__.load({
         const [draft, setDraft] = React.useState(null);
         const repoValue = (draft && draft.repo !== undefined) ? draft.repo : (status?.repo ?? '');
         const branchValue = (draft && draft.branch !== undefined) ? draft.branch : (status?.branch || 'main');
+        const proxyValue = (draft && draft.proxy !== undefined) ? draft.proxy : (status?.proxy ?? '');
         const intervalValue = (draft && draft.intervalMin !== undefined)
           ? draft.intervalMin
           : String(status?.intervalMs ? Math.round(status.intervalMs / 60000) : 5);
@@ -317,6 +331,8 @@ window.__ModuleLoader__.load({
           if (repoTrim !== (status?.repo ?? '')) body.repo = repoTrim === '' ? null : repoTrim;
           const branchTrim = branchValue.trim() || 'main';
           if (branchTrim !== (status?.branch || 'main')) body.branch = branchTrim;
+          const proxyTrim = proxyValue.trim();
+          if (proxyTrim !== (status?.proxy ?? '')) body.proxy = proxyTrim === '' ? null : proxyTrim;
           const minutes = Math.max(1, Number.parseInt(intervalValue, 10) || 5);
           const ms = minutes * 60000;
           if (ms !== (status?.intervalMs ?? 300000)) body.pullIntervalMs = ms;
@@ -340,7 +356,7 @@ window.__ModuleLoader__.load({
             await load();
             setBusy(false);
           }
-        }, [branchValue, intervalValue, load, repoValue, status, t]);
+        }, [branchValue, intervalValue, load, proxyValue, repoValue, status, t]);
 
         const phase = status?.phase ?? 'disabled';
         const phaseLabel = t(PHASE_KEYS[phase] ?? 'phaseDisabled');
@@ -443,8 +459,25 @@ window.__ModuleLoader__.load({
                   repo: event.target.value,
                   branch: branchValue,
                   intervalMin: intervalValue,
+                  proxy: proxyValue,
                   ...(prev ?? {}),
                   repo: event.target.value,
+                })),
+              }),
+            ),
+            h('div', { style: styles.row },
+              h('span', { style: styles.label }, t('proxyLabel')),
+              h('input', {
+                style: styles.input,
+                value: proxyValue,
+                placeholder: t('proxyPlaceholder'),
+                spellCheck: false,
+                onChange: (event) => setDraft(prev => ({
+                  repo: repoValue,
+                  branch: branchValue,
+                  intervalMin: intervalValue,
+                  ...(prev ?? {}),
+                  proxy: event.target.value,
                 })),
               }),
             ),
@@ -458,6 +491,7 @@ window.__ModuleLoader__.load({
                 onChange: (event) => setDraft(prev => ({
                   repo: repoValue,
                   intervalMin: intervalValue,
+                  proxy: proxyValue,
                   ...(prev ?? {}),
                   branch: event.target.value,
                 })),
@@ -470,6 +504,7 @@ window.__ModuleLoader__.load({
                 onChange: (event) => setDraft(prev => ({
                   repo: repoValue,
                   branch: branchValue,
+                  proxy: proxyValue,
                   ...(prev ?? {}),
                   intervalMin: event.target.value,
                 })),

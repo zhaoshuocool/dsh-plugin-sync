@@ -201,3 +201,45 @@ test('writeLocal and readLocal round-trip files under the sync dir; missing read
 		assert.equal(await ops.readLocal('baseline.json'), 'hello');
 	} finally { await cleanup(); }
 });
+
+// --- proxy ---------------------------------------------------------------------
+// A desktop host keeps its proxy in system settings, which git never reads, and
+// the subprocess environment arrives scrubbed — so the only working route is a
+// per-command `-c` override.
+
+test('runGit places proxy -c overrides before the subcommand', async () => {
+	const subprocess = fakeSubprocess();
+	await runGit(subprocess, ['fetch', '-q', 'origin', 'main'], { cwd: 'C:/repo', proxy: 'http://127.0.0.1:10808' });
+	assert.deepEqual(argvOf(subprocess.spawns), [[
+		'-c', 'http.proxy=http://127.0.0.1:10808',
+		'-c', 'https.proxy=http://127.0.0.1:10808',
+		'fetch', '-q', 'origin', 'main',
+	]]);
+});
+
+test('a configured proxy reaches every verb; an unset one leaves argv untouched', async () => {
+	const { dir, cleanup } = await tempDir();
+	try {
+		const proxied = fakeSubprocess();
+		await createGitOps({ subprocess: proxied, dir, repo: 'https://github.com/me/x.git', branch: 'main', proxy: 'socks5://127.0.0.1:1080', log() {} }).ensureWorkspace();
+		const fetchArgv = argvOf(proxied.spawns).find(a => a.includes('fetch'));
+		assert.equal(fetchArgv[0], '-c', 'the override precedes the subcommand');
+		assert.equal(fetchArgv[1], 'http.proxy=socks5://127.0.0.1:1080');
+
+		const plain = fakeSubprocess();
+		await createGitOps({ subprocess: plain, dir, repo: 'https://github.com/me/x.git', branch: 'main', log() {} }).ensureWorkspace();
+		assert.ok(argvOf(plain.spawns).every(a => !a.some(x => String(x).includes('.proxy='))), 'no proxy configured leaves argv as before');
+	} finally { await cleanup(); }
+});
+
+test('commitPush carries the proxy, the case that failed against GitHub without one', async () => {
+	const { dir, cleanup } = await tempDir();
+	try {
+		const subprocess = fakeSubprocess([{ code: 0 }, { code: 0 }, { code: 0 }]);
+		const ops = createGitOps({ subprocess, dir, repo: 'https://github.com/me/x.git', branch: 'main', proxy: 'http://127.0.0.1:10808', log() {} });
+		assert.equal(await ops.commitPush('{"formatVersion":1}', 'sync'), 'pushed');
+		const pushArgv = argvOf(subprocess.spawns).find(a => a.includes('push'));
+		assert.ok(pushArgv, 'the push ran');
+		assert.ok(pushArgv.includes('https.proxy=http://127.0.0.1:10808'));
+	} finally { await cleanup(); }
+});

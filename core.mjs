@@ -215,6 +215,7 @@ const status = {
 	phase: 'disabled',
 	repo: null,
 	branch: null,
+	proxy: null,
 	machineName: null,
 	intervalMs: null,
 	remoteState: null,
@@ -233,7 +234,7 @@ export function getStatus() {
 }
 
 /**
- * Merge a patch into the status. Only phase/repo/branch/machineName/
+ * Merge a patch into the status. Only phase/repo/branch/proxy/machineName/
  * remoteState/lastPullAt/lastPushAt/error are accepted; an unknown phase
  * value is ignored.
  */
@@ -242,6 +243,7 @@ export function setStatus(patch) {
 	if ('phase' in patch && PHASES.includes(patch.phase)) status.phase = patch.phase;
 	if ('repo' in patch) status.repo = patch.repo ?? null;
 	if ('branch' in patch) status.branch = patch.branch ?? null;
+	if ('proxy' in patch) status.proxy = patch.proxy ?? null;
 	if ('machineName' in patch) status.machineName = patch.machineName ?? null;
 	if ('intervalMs' in patch) status.intervalMs = patch.intervalMs ?? null;
 	if ('remoteState' in patch) status.remoteState = patch.remoteState ?? null;

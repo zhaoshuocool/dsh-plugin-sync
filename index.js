@@ -26,7 +26,28 @@ export const inject = ['pluginManager', 'fs', 'subprocess', 'webServer', 'timer'
 /** Accepted repo forms: URL schemes git understands, or absolute local paths. */
 const REPO_PATTERN = /^(https?:\/\/|ssh:\/\/|git:\/\/|git\+|file:\/\/|git@[\w.-]+:|[A-Za-z]:[\\/]|\/)/;
 
-const FIELD_KEYS = new Set(['repo', 'branch', 'pullIntervalMs', 'machineName']);
+const FIELD_KEYS = new Set(['repo', 'branch', 'pullIntervalMs', 'machineName', 'proxy']);
+
+/**
+ * Proxy URL schemes Git's HTTP transport understands. Desktop apps usually get
+ * their proxy from the system settings, which `git` never reads; the subprocess
+ * environment is scrubbed too, so a proxy has to be named explicitly here.
+ */
+const PROXY_PROTOCOLS = new Set(['http:', 'https:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:']);
+
+/** Normalize a proxy URL; returns null for "no proxy", undefined when invalid. */
+function normalizeProxy(raw) {
+	const trimmed = raw.trim();
+	if (trimmed === '') return null;
+	let parsed = null;
+	try {
+		parsed = new URL(trimmed);
+	} catch {
+		parsed = null;
+	}
+	if (!parsed || !PROXY_PROTOCOLS.has(parsed.protocol) || parsed.hostname === '') return undefined;
+	return parsed.href.replace(/\/+$/, '');
+}
 
 class SyncConfigError extends Error {
 	constructor(issues) {
@@ -43,7 +64,7 @@ function parseConfig(data) {
 	}
 	const issues = [];
 	for (const key of Object.keys(source)) {
-		if (!FIELD_KEYS.has(key)) issues.push({ path: [key], message: `unknown config field "${key}" (expected repo/branch/pullIntervalMs/machineName)` });
+		if (!FIELD_KEYS.has(key)) issues.push({ path: [key], message: `unknown config field "${key}" (expected repo/branch/pullIntervalMs/machineName/proxy)` });
 	}
 
 	let repo = null;
@@ -82,8 +103,20 @@ function parseConfig(data) {
 		} else machineName = source.machineName;
 	}
 
+	let proxy = null;
+	if (source.proxy !== undefined && source.proxy !== null) {
+		if (typeof source.proxy !== 'string') {
+			issues.push({ path: ['proxy'], message: 'proxy must be a URL string or null' });
+		} else {
+			const normalized = normalizeProxy(source.proxy);
+			if (normalized === undefined) {
+				issues.push({ path: ['proxy'], message: `proxy must be an http/https/socks URL such as "http://127.0.0.1:10808", got "${source.proxy.trim()}"` });
+			} else proxy = normalized;
+		}
+	}
+
 	if (issues.length) throw new SyncConfigError(issues);
-	return { repo, branch, pullIntervalMs, machineName };
+	return { repo, branch, pullIntervalMs, machineName, proxy };
 }
 
 /**
@@ -400,28 +433,43 @@ function publishOutcome(outcome, kind) {
 	}
 }
 
+/**
+ * Build this plugin's config write path.
+ *
+ * A Loader `Entry` keeps its identity inside `entry.options` (`id` / `name`);
+ * the entry object itself has no `patchId` / `name` / `moduleName` property to
+ * match on. Address our own entry the way the editor's other callers do: the
+ * running fiber's own entry when the editor lists it, otherwise a lookup by
+ * `options.id` — the same key the settings bundle uses.
+ */
+export function createSaveConfig(ctx) {
+	return async (values) => {
+		const entries = ctx.configEditor.entries();
+		const self = ctx.fiber?.entry;
+		const entry = self !== undefined && entries.includes(self)
+			? self
+			: entries.find(row => row?.options?.id === PACKAGE_NAME);
+		if (!entry) {
+			const error = new Error('this plugin is not addressable in the profile patch');
+			error.status = 503;
+			throw error;
+		}
+		// The configEditor writes the patch entry and reconciles the Loader, so a
+		// save from the Settings tab behaves exactly like editing the YAML by hand.
+		await ctx.configEditor.edit(entry, (current) => {
+			const next = { ...(current ?? {}) };
+			for (const [key, value] of Object.entries(values)) {
+				if (value === null) delete next[key];
+				else next[key] = value;
+			}
+			return next;
+		});
+	};
+}
+
 export function apply(ctx, config) {
 	return ctx.effect(() => {
-		// Persist a config change through the profile's own edit path: the
-		// configEditor writes the patch entry and reconciles the Loader, so a
-		// save from the Settings tab behaves exactly like editing the YAML.
-		const saveConfig = async (values) => {
-			const entries = ctx.configEditor.entries();
-			const entry = entries.find(e => e?.patchId === PACKAGE_NAME || e?.name === PACKAGE_NAME || e?.moduleName === PACKAGE_NAME);
-			if (!entry) {
-				const error = new Error('this plugin is not addressable in the profile patch');
-				error.status = 503;
-				throw error;
-			}
-			await ctx.configEditor.edit(entry, (current) => {
-				const next = { ...(current ?? {}) };
-				for (const [key, value] of Object.entries(values)) {
-					if (value === null) delete next[key];
-					else next[key] = value;
-				}
-				return next;
-			});
-		};
+		const saveConfig = createSaveConfig(ctx);
 
 		// Routes answer even while sync is disabled, so the Settings tab always
 		// has something to read.
@@ -435,7 +483,7 @@ export function apply(ctx, config) {
 
 		const conf = Config(config);
 		if (!conf.repo) {
-			setStatus({ phase: 'disabled', repo: null, branch: conf.branch, machineName: conf.machineName, intervalMs: conf.pullIntervalMs });
+			setStatus({ phase: 'disabled', repo: null, branch: conf.branch, proxy: conf.proxy, machineName: conf.machineName, intervalMs: conf.pullIntervalMs });
 			return disposeRoutes;
 		}
 
@@ -470,6 +518,7 @@ export function apply(ctx, config) {
 			dir: syncDir,
 			repo: conf.repo,
 			branch: conf.branch,
+			proxy: conf.proxy,
 			log,
 		});
 
@@ -484,7 +533,7 @@ export function apply(ctx, config) {
 		});
 		activeEngine = engine;
 
-		setStatus({ phase: 'idle', repo: conf.repo, branch: conf.branch, machineName: conf.machineName, intervalMs: conf.pullIntervalMs });
+		setStatus({ phase: 'idle', repo: conf.repo, branch: conf.branch, proxy: conf.proxy, machineName: conf.machineName, intervalMs: conf.pullIntervalMs });
 
 		const runLogged = (kind) => async () => {
 			setStatus({ phase: 'syncing' });

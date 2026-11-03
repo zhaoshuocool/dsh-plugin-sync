@@ -28,6 +28,8 @@
   "configTitle": "Configuration",
   "repoLabel": "Repository",
   "branchLabel": "Branch",
+  "proxyLabel": "Proxy",
+  "proxyPlaceholder": "blank = no proxy, e.g. http://127.0.0.1:10808",
   "intervalLabel": "Pull interval",
   "minUnit": "min",
   "configHint": "Saved changes are written to this profile’s cordis.patch.yml and take effect immediately.",

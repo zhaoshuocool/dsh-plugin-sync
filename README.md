@@ -21,9 +21,14 @@ profile 的插件 bundle 清单（安装了哪些 bundle、各自是否启用）
     branch: main            # 可选，默认 main
     pullIntervalMs: 300000  # 可选，默认 5 分钟，最小 60000
     machineName: desk-1     # 可选，默认 os.hostname()
+    proxy: http://127.0.0.1:10808  # 可选，留空 = 不走代理
 ```
 
 保存后自动生效（patch 热重载）。未配置 `repo` 时插件处于 `disabled`。
+
+`proxy` 只作用于 http/https 远端（`ssh:` 远端请用 ssh 自己的配置）。桌面环境
+需要它：Windows 的代理设置放在系统里，`git` 不读，子进程环境又被清理过，
+所以插件对每次 git 调用注入 `-c http.proxy=<url> -c https.proxy=<url>`。
 
 ## 首次连接（引导二选一）
 
@@ -44,7 +49,7 @@ profile 的插件 bundle 清单（安装了哪些 bundle、各自是否启用）
 - `POST /api/plugin-sync/run` — 立即执行一轮 pull+push
 - `POST /api/plugin-sync/bootstrap` — `{ "mode": "remote" | "merge" }`
 - `POST /api/plugin-sync/confirm-empty`
-- `POST /api/plugin-sync/config` — `{ repo?, branch?, pullIntervalMs?, machineName? }`；
+- `POST /api/plugin-sync/config` — `{ repo?, branch?, pullIntervalMs?, machineName?, proxy? }`；
   经 `configEditor` 服务写入 profile 的 `cordis.patch.yml` 并按 Loader 正常路径热生效，
   与手工编辑 YAML 等价（`repo: null` 或空字符串 = 清除 = 停用同步）
 
@@ -81,3 +86,22 @@ YAML 片段是给习惯命令行的人的等价写法。
 已知观察：bundle 的 `source` 字符串在不同安装路径下可能以不同斜杠形式出现
 （`link:E:\…` vs `link:E:/…`），会被视为 source 漂移触发 reinstall/引导。
 跨机器同步时建议远端使用 git URL 类 source。
+
+## 修复与验证记录（2026-11-04，Windows，真实 GitHub 远端）
+
+1. **保存必失败**：`saveConfig` 按 `patchId` / `name` / `moduleName` 找自己的 entry，
+   而 Loader Entry 的身份在 `entry.options` 里，于是永远查不到 → 稳定 503
+   `this plugin is not addressable in the profile patch`。改成宿主其它调用方的写法
+   （运行中 fiber 的 entry，否则按 `options.id`），并抽成导出的 `createSaveConfig(ctx)`——
+   api 测试一直注入假 `saveConfig`，这条只在真实宿主里跑过的写路径此前没有覆盖。
+2. **前端吞掉失败原因**：`postAction` 对非 2xx 直接 throw，丢掉响应里的 `error`，
+   页面只剩「配置保存失败。」。现在会读出响应体，把真实原因显示出来。
+3. **代理**：git 不读 Windows 系统代理，子进程环境又被 scrub，直连 GitHub 443 超时
+   （`git fetch failed … Failed to connect to github.com port 443`、
+   `git push rejected: Recv failure: Connection was reset`）。新增 `proxy` 配置项，
+   对每次调用注入 `-c http.proxy=… -c https.proxy=…`；设置页加同名输入框（留空=不走代理）。
+4. 实测远端 `https://github.com/zhaoshuocool/plugin-sync.git` + 代理 `http://127.0.0.1:10808`：
+   保存写入 patch → 热重载 → 读到另一台机器推的清单（5 个 bundle）→
+   `bootstrap {"mode":"remote"}` 收敛：装 4 个、移除 1 个、`errors: []`，
+   `baseline.json` / `state.json` 落盘，状态回到 `idle`。
+   顺带确认：pnpm 安装可直达 GitHub，只有 git 这条路需要代理。
