@@ -50,8 +50,13 @@ window.__ModuleLoader__.load({
         branchLabel: 'Branch',
         intervalLabel: 'Pull interval',
         minUnit: 'min',
-        configHint: 'These values are read-only here. Edit the dsh-plugin-sync entry in the profile cordis.patch.yml; changes take effect automatically.',
+        configHint: 'Saved changes are written to this profile’s cordis.patch.yml and take effect immediately.',
         notConfigured: 'not configured',
+        save: 'Save',
+        saving: 'Saving…',
+        saved: 'Saved. The plugin restarted with the new configuration.',
+        saveFailed: 'The configuration could not be saved.',
+        noChange: 'Nothing changed to save.',
         runNow: 'Sync now',
         runStarted: 'Sync started',
         chooseTitle: 'No baseline on the remote yet',
@@ -93,8 +98,13 @@ window.__ModuleLoader__.load({
         branchLabel: '分支',
         intervalLabel: '拉取间隔',
         minUnit: '分钟',
-        configHint: '这里只读。要修改请在配置档案的 cordis.patch.yml 里改 dsh-plugin-sync 条目，保存后自动生效。',
+        configHint: '保存后写入本配置档案的 cordis.patch.yml，立即生效。',
         notConfigured: '未配置',
+        save: '保存',
+        saving: '保存中…',
+        saved: '已保存，插件已按新配置重启。',
+        saveFailed: '配置保存失败。',
+        noChange: '没有需要保存的改动。',
         runNow: '立即同步',
         runStarted: '已触发同步',
         chooseTitle: '远端还没有基线',
@@ -114,6 +124,7 @@ window.__ModuleLoader__.load({
     const RUN_URL = '/api/plugin-sync/run';
     const BOOTSTRAP_URL = '/api/plugin-sync/bootstrap';
     const CONFIRM_EMPTY_URL = '/api/plugin-sync/confirm-empty';
+    const CONFIG_URL = '/api/plugin-sync/config';
 
     /** Read the current sync status from the Host. */
     async function readStatus() {
@@ -165,7 +176,7 @@ window.__ModuleLoader__.load({
       },
       input: {
         flex: 1, minWidth: 0, fontSize: '12px', lineHeight: '18px',
-        color: 'var(--dsw-alias-label-secondary)',
+        color: 'var(--dsw-alias-label-primary)',
         background: 'var(--dsw-alias-bg-layer-2)',
         border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '7px',
         padding: '5px 8px', fontFamily: 'monospace',
@@ -290,6 +301,47 @@ window.__ModuleLoader__.load({
           }
         }, [load, t]);
 
+        // Editable configuration: the draft starts empty and falls back to the
+        // live status values; saving posts only the fields that changed and the
+        // Host persists them through the profile config editor.
+        const [draft, setDraft] = React.useState(null);
+        const repoValue = (draft && draft.repo !== undefined) ? draft.repo : (status?.repo ?? '');
+        const branchValue = (draft && draft.branch !== undefined) ? draft.branch : (status?.branch || 'main');
+        const intervalValue = (draft && draft.intervalMin !== undefined)
+          ? draft.intervalMin
+          : String(status?.intervalMs ? Math.round(status.intervalMs / 60000) : 5);
+
+        const onSaveConfig = React.useCallback(async () => {
+          const body = {};
+          const repoTrim = repoValue.trim();
+          if (repoTrim !== (status?.repo ?? '')) body.repo = repoTrim === '' ? null : repoTrim;
+          const branchTrim = branchValue.trim() || 'main';
+          if (branchTrim !== (status?.branch || 'main')) body.branch = branchTrim;
+          const minutes = Math.max(1, Number.parseInt(intervalValue, 10) || 5);
+          const ms = minutes * 60000;
+          if (ms !== (status?.intervalMs ?? 300000)) body.pullIntervalMs = ms;
+          if (Object.keys(body).length === 0) {
+            setNotice({ kind: 'warn', text: t('noChange') });
+            return;
+          }
+          setBusy(true);
+          setNotice(null);
+          try {
+            const result = await postAction(CONFIG_URL, body);
+            if (result && result.ok === true) {
+              setDraft(null);
+              setNotice({ kind: 'ok', text: t('saved') });
+            } else {
+              setNotice({ kind: 'warn', text: (result && result.error) || t('saveFailed') });
+            }
+          } catch {
+            setNotice({ kind: 'warn', text: t('saveFailed') });
+          } finally {
+            await load();
+            setBusy(false);
+          }
+        }, [branchValue, intervalValue, load, repoValue, status, t]);
+
         const phase = status?.phase ?? 'disabled';
         const phaseLabel = t(PHASE_KEYS[phase] ?? 'phaseDisabled');
         const logs = (status?.log ?? []).slice(-20).reverse();
@@ -377,30 +429,64 @@ window.__ModuleLoader__.load({
                 )
               : null,
 
-          // Configuration (read-only) + sync now.
+          // Configuration (editable, saved through the Host config editor) + sync now.
           h('div', { style: styles.card },
             h('h3', { style: styles.cardTitle }, t('configTitle')),
             h('div', { style: styles.row },
               h('span', { style: styles.label }, t('repoLabel')),
               h('input', {
-                style: styles.input, readOnly: true, value: status?.repo ?? t('notConfigured'),
+                style: styles.input,
+                value: repoValue,
+                placeholder: t('notConfigured'),
+                spellCheck: false,
+                onChange: (event) => setDraft(prev => ({
+                  repo: event.target.value,
+                  branch: branchValue,
+                  intervalMin: intervalValue,
+                  ...(prev ?? {}),
+                  repo: event.target.value,
+                })),
               }),
             ),
             h('div', { style: styles.row },
               h('span', { style: styles.label }, t('branchLabel')),
-              h('input', { style: styles.input, readOnly: true, value: status?.branch ?? '' }),
+              h('input', {
+                style: { ...styles.input, maxWidth: '160px' },
+                value: branchValue,
+                defaultValue: 'main',
+                spellCheck: false,
+                onChange: (event) => setDraft(prev => ({
+                  repo: repoValue,
+                  intervalMin: intervalValue,
+                  ...(prev ?? {}),
+                  branch: event.target.value,
+                })),
+              }),
               h('span', { style: styles.label }, t('intervalLabel')),
               h('input', {
-                style: styles.input,
-                readOnly: true,
-                value: status?.intervalMs ? Math.round(status.intervalMs / 60000) + ' ' + t('minUnit') : '',
+                style: { ...styles.input, maxWidth: '90px' },
+                value: intervalValue,
+                inputMode: 'numeric',
+                onChange: (event) => setDraft(prev => ({
+                  repo: repoValue,
+                  branch: branchValue,
+                  ...(prev ?? {}),
+                  intervalMin: event.target.value,
+                })),
               }),
+              h('span', { style: styles.hint }, t('minUnit')),
             ),
             h('p', { style: styles.hint }, t('configHint')),
             h('div', { style: styles.row },
               h('button', {
                 type: 'button',
-                style: { ...styles.button, ...styles.buttonPrimary, opacity: (busy || phase === 'disabled') ? 0.6 : 1 },
+                style: { ...styles.button, ...styles.buttonPrimary, opacity: busy ? 0.6 : 1 },
+                disabled: busy,
+                onClick: () => void onSaveConfig(),
+              }, busy ? t('saving') : t('save')),
+              h('button', {
+                type: 'button',
+                style: { ...styles.button, opacity: (busy || phase === 'disabled') ? 0.6 : 1 },
                 disabled: busy || phase === 'disabled' || phase === 'syncing',
                 onClick: () => void act(RUN_URL, {}),
               }, phase === 'syncing' ? t('phaseSyncing') : t('runNow')),

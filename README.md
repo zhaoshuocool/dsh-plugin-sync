@@ -10,7 +10,8 @@ profile 的插件 bundle 清单（安装了哪些 bundle、各自是否启用）
 ## 安装
 
 在 DSH 里安装本 bundle（或 `plugin_manager install_bundle`，target 为本目录），
-然后在 profile 的 `cordis.patch.yml` 里配置：
+然后配置远端仓库。**推荐直接在 设置 → Plugins → 插件同步 页面填写仓库地址并保存**
+（改动会写入 profile 的 `cordis.patch.yml` 并即时生效）。等价的 YAML 写法：
 
 ```yaml
 - id: dsh-plugin-sync
@@ -43,6 +44,12 @@ profile 的插件 bundle 清单（安装了哪些 bundle、各自是否启用）
 - `POST /api/plugin-sync/run` — 立即执行一轮 pull+push
 - `POST /api/plugin-sync/bootstrap` — `{ "mode": "remote" | "merge" }`
 - `POST /api/plugin-sync/confirm-empty`
+- `POST /api/plugin-sync/config` — `{ repo?, branch?, pullIntervalMs?, machineName? }`；
+  经 `configEditor` 服务写入 profile 的 `cordis.patch.yml` 并按 Loader 正常路径热生效，
+  与手工编辑 YAML 等价（`repo: null` 或空字符串 = 清除 = 停用同步）
+
+因此配置也可以**全部在设置页里完成**：填写仓库/分支/间隔 → 保存。README 顶部的
+YAML 片段是给习惯命令行的人的等价写法。
 
 ## 实现要点
 

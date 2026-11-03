@@ -48,7 +48,7 @@ async function call(route, req) {
 	return res;
 }
 
-function setup({ rejection, scheduler, engine } = {}) {
+function setup({ rejection, scheduler, engine, saveConfig } = {}) {
 	const web = fakeWeb();
 	const published = [];
 	const disposers = registerRoutes(web, fakeConnection(rejection), {
@@ -56,11 +56,12 @@ function setup({ rejection, scheduler, engine } = {}) {
 		getScheduler: () => scheduler ?? null,
 		getEngine: () => engine ?? null,
 		publish: (outcome, kind) => published.push({ outcome, kind }),
+		...(saveConfig ? { saveConfig } : {}),
 	});
 	return { web, disposers, published };
 }
 
-test('registers the four exact routes under /api/plugin-sync', () => {
+test('registers the five exact routes under /api/plugin-sync', () => {
 	const { web } = setup();
 	assert.deepEqual(
 		web.routes.map(r => [r.kind, r.path]),
@@ -69,6 +70,7 @@ test('registers the four exact routes under /api/plugin-sync', () => {
 			['exact', `${BASE}/run`],
 			['exact', `${BASE}/bootstrap`],
 			['exact', `${BASE}/confirm-empty`],
+			['exact', `${BASE}/config`],
 		],
 	);
 });
@@ -142,6 +144,40 @@ test('POST confirm-empty runs engine.confirmEmpty once', async () => {
 	const res = await call(web.find(`${BASE}/confirm-empty`), makeReq({ method: 'POST' }));
 	assert.equal(res.status, 200);
 	assert.equal(calls, 1);
+});
+
+test('POST config validates the patch fields and persists them through saveConfig', async () => {
+	const seen = [];
+	const { web } = setup({ saveConfig: async (values) => { seen.push(values); } });
+	const res = await call(web.find(`${BASE}/config`), makeReq({
+		method: 'POST',
+		body: { repo: 'file:///C:/sync/repo', branch: 'dev', pullIntervalMs: 120000 },
+	}));
+	assert.equal(res.status, 200);
+	assert.equal(res.json().ok, true);
+	assert.deepEqual(seen, [{ repo: 'file:///C:/sync/repo', branch: 'dev', pullIntervalMs: 120000 }]);
+});
+
+test('POST config with a malformed repo returns 400 and saves nothing', async () => {
+	const seen = [];
+	const { web } = setup({ saveConfig: async (values) => { seen.push(values); } });
+	const res = await call(web.find(`${BASE}/config`), makeReq({ method: 'POST', body: { repo: 'not a repo' } }));
+	assert.equal(res.status, 400);
+	assert.equal(seen.length, 0);
+});
+
+test('POST config with repo null clears it, letting the page disable sync', async () => {
+	const seen = [];
+	const { web } = setup({ saveConfig: async (values) => { seen.push(values); } });
+	const res = await call(web.find(`${BASE}/config`), makeReq({ method: 'POST', body: { repo: null } }));
+	assert.equal(res.status, 200);
+	assert.deepEqual(seen, [{ repo: null }]);
+});
+
+test('POST config without a wired saveConfig reports 503', async () => {
+	const { web } = setup();
+	const res = await call(web.find(`${BASE}/config`), makeReq({ method: 'POST', body: { repo: 'https://github.com/me/x.git' } }));
+	assert.equal(res.status, 503);
 });
 
 test('invalid JSON bodies return 400 and disposers unregister every route', async () => {

@@ -19,7 +19,7 @@ import { createSyncEngine } from './engine.mjs';
 import { createGitOps } from './git.mjs';
 import { getStatus, repoHashDir, setStatus, logStatus } from './core.mjs';
 
-export const inject = ['pluginManager', 'fs', 'subprocess', 'webServer', 'timer', 'connection'];
+export const inject = ['pluginManager', 'fs', 'subprocess', 'webServer', 'timer', 'connection', 'configEditor'];
 
 // --- Config (zero-dependency Standard Schema) --------------------------------
 
@@ -238,7 +238,7 @@ function readBody(req) {
  * @param accessors - {{ getStatus, getScheduler, getEngine }} live accessors.
  * @returns disposer unregistering every route.
  */
-export function registerRoutes(web, connection, { getStatus, getScheduler, getEngine, publish }) {
+export function registerRoutes(web, connection, { getStatus, getScheduler, getEngine, publish, saveConfig }) {
 	const trusted = (req, res) => {
 		const rejection = connection.requestRejection({ headers: req.headers ?? {} });
 		if (rejection !== undefined) {
@@ -318,6 +318,40 @@ export function registerRoutes(web, connection, { getStatus, getScheduler, getEn
 			return engine.bootstrap(mode);
 		}),
 		engineRunner(`${BASE}/confirm-empty`, (engine) => engine.confirmEmpty()),
+		post(`${BASE}/config`, async (req, res, body) => {
+			if (typeof saveConfig !== 'function') {
+				sendJson(res, 503, { ok: false, error: 'config-editor-unavailable' });
+				return;
+			}
+			const values = {};
+			for (const key of FIELD_KEYS) {
+				if (key in body) values[key] = body[key];
+			}
+			if (Object.keys(values).length === 0) {
+				sendJson(res, 400, { ok: false, error: 'empty-config-patch' });
+				return;
+			}
+			// Shape-check through the same Config parser the Loader uses, then
+			// persist only the fields the page actually sent.
+			let parsed;
+			try {
+				parsed = parseConfig(values);
+			} catch (error) {
+				sendJson(res, 400, { ok: false, error: error?.issues?.map(i => `${i.path}: ${i.message}`).join('; ') ?? String(error?.message ?? error) });
+				return;
+			}
+			const next = {};
+			for (const key of Object.keys(values)) {
+				const raw = values[key];
+				if (raw === null || raw === '') {
+					next[key] = null;
+					continue;
+				}
+				next[key] = parsed[key];
+			}
+			await saveConfig(next);
+			sendJson(res, 200, { ok: true, saved: next });
+		}),
 	];
 
 	const disposers = routes.map(route => web.register(route));
@@ -368,6 +402,27 @@ function publishOutcome(outcome, kind) {
 
 export function apply(ctx, config) {
 	return ctx.effect(() => {
+		// Persist a config change through the profile's own edit path: the
+		// configEditor writes the patch entry and reconciles the Loader, so a
+		// save from the Settings tab behaves exactly like editing the YAML.
+		const saveConfig = async (values) => {
+			const entries = ctx.configEditor.entries();
+			const entry = entries.find(e => e?.patchId === PACKAGE_NAME || e?.name === PACKAGE_NAME || e?.moduleName === PACKAGE_NAME);
+			if (!entry) {
+				const error = new Error('this plugin is not addressable in the profile patch');
+				error.status = 503;
+				throw error;
+			}
+			await ctx.configEditor.edit(entry, (current) => {
+				const next = { ...(current ?? {}) };
+				for (const [key, value] of Object.entries(values)) {
+					if (value === null) delete next[key];
+					else next[key] = value;
+				}
+				return next;
+			});
+		};
+
 		// Routes answer even while sync is disabled, so the Settings tab always
 		// has something to read.
 		const disposeRoutes = registerRoutes(ctx.webServer, ctx.connection, {
@@ -375,6 +430,7 @@ export function apply(ctx, config) {
 			getScheduler,
 			getEngine,
 			publish: publishOutcome,
+			saveConfig,
 		});
 
 		const conf = Config(config);
