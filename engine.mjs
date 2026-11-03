@@ -40,10 +40,11 @@ function sameBundles(a, b) {
  *   pm: { listBundles(): Promise<object[]>, installBundle(spec: string): Promise<object>,
  *         removeBundle(name: string): Promise<object>, setBundleEnabled(name: string, enabled: boolean): Promise<object> },
  *   io: { readJson(path: string): Promise<object|null>, writeJson(path: string, obj: object): Promise<void> },
- *   log(level: string, msg: string): void, machineName: string, now(): string
+ *   log(level: string, msg: string): void, machineName: string, now(): string,
+ *   selfName?: string (the sync bundle's own name; excluded from self-mutating actions)
  * }}
  */
-export function createSyncEngine({ git, pm, io, log, machineName, now }) {
+export function createSyncEngine({ git, pm, io, log, machineName, now, selfName = null }) {
 	let emptyConfirmed = false;
 
 	function outcome(action, { applied = [], errors = [], remoteState } = {}) {
@@ -101,7 +102,7 @@ export function createSyncEngine({ git, pm, io, log, machineName, now }) {
 	 * profile with less than it had.
 	 */
 	async function converge(local, remote, applied, errors) {
-		const plan = planConvergence(local, remote);
+		const plan = planConvergence(local, remote, { selfName });
 		const remoteByName = new Map(remote.bundles.map(e => [e.name, e]));
 		for (const entry of plan.install) {
 			const ok = await pmCall(applied, errors, 'install', entry.name, () => pm.installBundle(entry.source));

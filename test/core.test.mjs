@@ -244,6 +244,37 @@ test('planConvergence on empty remote plans removal of every source-carrying loc
 	assert.deepEqual(plan.install, []);
 });
 
+test('planConvergence with selfName never installs, removes, or reinstalls the sync bundle itself', () => {
+	const local = [
+		{ name: 'dsh-plugin-sync', source: 'link:E:\\a', enabled: true },
+		{ name: 'gone-remote', source: 's4', enabled: true },
+	];
+	const remote = { formatVersion: 1, bundles: [
+		// the same bundle under a different source form: drift would reinstall
+		{ name: 'dsh-plugin-sync', source: 'link:E:/a', enabled: true },
+	], updatedAt: 'x', updatedBy: 'y' };
+	const plan = planConvergence(local, remote, { selfName: 'dsh-plugin-sync' });
+	assert.deepEqual(plan.reinstall, [], 'self source drift is not an action');
+	assert.deepEqual(plan.remove, ['gone-remote'], 'only the other bundle is removed');
+	assert.deepEqual(plan.install, []);
+	// self absent locally, present remotely: no self install either
+	const plan2 = planConvergence([], { formatVersion: 1, bundles: [
+		{ name: 'dsh-plugin-sync', source: 's', enabled: true },
+		{ name: 'y', source: 's2', enabled: true },
+	], updatedAt: 'x', updatedBy: 'y' }, { selfName: 'dsh-plugin-sync' });
+	assert.deepEqual(plan2.install, [{ name: 'y', source: 's2' }]);
+	// enable/disable of self stay planned: they do not nest HMR transactions
+	const plan3 = planConvergence(
+		[{ name: 'dsh-plugin-sync', source: 's', enabled: true }],
+		{ formatVersion: 1, bundles: [{ name: 'dsh-plugin-sync', source: 's', enabled: false }], updatedAt: 'x', updatedBy: 'y' },
+		{ selfName: 'dsh-plugin-sync' },
+	);
+	assert.deepEqual(plan3.disable, ['dsh-plugin-sync']);
+	// without the option the old behaviour stands
+	const plan4 = planConvergence(local, remote);
+	assert.deepEqual(plan4.reinstall, [{ name: 'dsh-plugin-sync', source: 'link:E:/a' }]);
+});
+
 // --- isShrinkingToEmpty ------------------------------------------------------
 
 test('isShrinkingToEmpty is true only for local>0 against empty remote', () => {

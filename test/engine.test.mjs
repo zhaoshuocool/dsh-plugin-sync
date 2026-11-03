@@ -50,7 +50,7 @@ function makeIo() {
 	};
 }
 
-function makeEngine({ rows = [], remote = null, baseline = null, pushResults } = {}) {
+function makeEngine({ rows = [], remote = null, baseline = null, pushResults, selfName } = {}) {
 	const git = makeFakeGit({ remote, baseline });
 	if (pushResults) git.state.pushResults = pushResults;
 	const pm = makeFakePm(rows);
@@ -61,11 +61,32 @@ function makeEngine({ rows = [], remote = null, baseline = null, pushResults } =
 		log: (level, msg) => logs.push([level, msg]),
 		machineName: 'machine-me',
 		now: () => NOW,
+		...(selfName ? { selfName } : {}),
 	});
 	return { engine, git, pm, io, logs };
 }
 
 // --- pull -------------------------------------------------------------------
+
+test('bootstrap remote never removes or reinstalls the sync bundle itself on source drift', async () => {
+	// the live failure: the manifest spells dsh-plugin-sync's link source with
+	// forward slashes while pluginManager reports backslashes; converging must
+	// not plan a remove+install of the bundle that is running this very call.
+	const remote = manifestOf([
+		{ name: 'dsh-plugin-sync', source: 'link:E:/a', enabled: true },
+		{ name: 'other', source: 'github:me/other', enabled: true },
+	]);
+	const { engine, pm, git } = makeEngine({
+		rows: [row('dsh-plugin-sync', 'link:E:\\a', true), row('other', 'github:me/other', true)],
+		remote,
+		selfName: 'dsh-plugin-sync',
+	});
+	const outcome = await engine.bootstrap('remote');
+	assert.ok(outcome.action === 'converged' || outcome.action === 'bootstrapped');
+	assert.deepEqual(outcome.errors, []);
+	assert.deepEqual(pm.calls, [], 'no pluginManager mutation for self drift with everything else equal');
+	assert.ok(git.state.baselines['baseline.json'], 'a clean convergence still records the baseline');
+});
 
 test('pull installs a bundle that only exists on the remote', async () => {
 	const remote = manifestOf([

@@ -203,6 +203,9 @@ export function createScheduler({ pull, push, intervalMs, debounceMs = 30_000, b
 /** Base path of this plugin's routes. */
 const BASE = '/api/plugin-sync';
 
+/** Own bundle name; convergence never installs, removes, or reinstalls it. */
+const PACKAGE_NAME = 'dsh-plugin-sync';
+
 /** Answer one HTTP request with JSON (same idiom as other profile controllers). */
 function sendJson(res, status, body) {
 	res.writeHead(status, {
@@ -421,6 +424,7 @@ export function apply(ctx, config) {
 			log,
 			machineName: conf.machineName,
 			now: () => new Date().toISOString(),
+			selfName: PACKAGE_NAME,
 		});
 		activeEngine = engine;
 

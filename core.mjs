@@ -161,9 +161,14 @@ export function mergeUnion(a, b, machineName, now) {
  * Plan pluginManager actions to converge local onto remote.
  * Entries whose remote source is null name bundles that ship with the DSH
  * installation: they cannot be installed or removed via a spec, so they are
- * skipped in install/remove/reinstall.
+ * skipped in install/remove/reinstall. `opts.selfName` names the sync bundle
+ * itself: installing, removing, or reinstalling the bundle that is executing
+ * the convergence would mutate the running plugin (and nest HMR transactions
+ * inside its own request), so those actions are skipped for it as well; only
+ * enable/disable remain planned for self.
  */
-export function planConvergence(local, remote) {
+export function planConvergence(local, remote, opts = {}) {
+	const self = opts.selfName ?? null;
 	const localByName = new Map(local.map(e => [e.name, e]));
 	const remoteByName = new Map(remote.bundles.map(e => [e.name, e]));
 	const install = [];
@@ -174,17 +179,17 @@ export function planConvergence(local, remote) {
 	for (const entry of remote.bundles) {
 		const mine = localByName.get(entry.name);
 		if (!mine) {
-			if (entry.source != null) install.push({ name: entry.name, source: entry.source });
+			if (entry.source != null && entry.name !== self) install.push({ name: entry.name, source: entry.source });
 			continue;
 		}
-		if (entry.source != null && entry.source !== mine.source) {
+		if (entry.source != null && entry.source !== mine.source && entry.name !== self) {
 			reinstall.push({ name: entry.name, source: entry.source });
 		}
 		if (entry.enabled === true && mine.enabled !== true) enable.push(entry.name);
 		if (entry.enabled === false && mine.enabled !== false) disable.push(entry.name);
 	}
 	for (const entry of local) {
-		if (!remoteByName.has(entry.name) && entry.source != null) remove.push(entry.name);
+		if (!remoteByName.has(entry.name) && entry.source != null && entry.name !== self) remove.push(entry.name);
 	}
 	return { install, remove, enable, disable, reinstall };
 }

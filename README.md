@@ -47,6 +47,8 @@ profile 的插件 bundle 清单（安装了哪些 bundle、各自是否启用）
 ## 实现要点
 
 - 零运行时 npm 依赖；git 走系统 `git` CLI（`subprocess` 注入服务）。
+- 收敛计划对插件自身只允许启用/停用，永不 install/remove/reinstall 自己
+  （在自身请求事务里移除自己会触发 "HMR transactions cannot be nested"）。
 - 每台机器在 `<DSH_HOME>/plugin-sync/<sha256(repo)[:16]>/` 维护独立 workcopy、
   `baseline.json`（上次共同确认的清单）与 `state.json`（远端镜像）。
 - 推送触发：监听 profile 的 `package.json` 与 `cordis.patch.yml`（30s debounce）；
