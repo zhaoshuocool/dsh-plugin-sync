@@ -83,6 +83,25 @@ test('pull installs a bundle that only exists on the remote', async () => {
 	assert.deepEqual(pm.calls.filter(c => c[0] === 'installBundle'), [['installBundle', 'github:x/two']]);
 });
 
+test('pull treats pluginManager ChangeResult failures as errors and keeps the baseline', async () => {
+	const baseline = manifestOf([row('one', 's1', true)]);
+	const remote = manifestOf([row('one', 's1', true), row('nope', 'github:x/nope', true)]);
+	const { engine, pm, git, io } = makeEngine({
+		rows: [row('one', 's1', true)],
+		remote,
+		baseline,
+	});
+	pm.installBundle = async (spec) => {
+		pm.calls.push(['installBundle', spec]);
+		return { changed: false, application: 'failed', stage: 'install', target: spec, error: { code: 'invalid-spec', diagnostic: 'spec refused' } };
+	};
+	const outcome = await engine.pull();
+	assert.equal(outcome.action, 'error');
+	assert.match(outcome.errors[0], /invalid-spec/);
+	assert.equal(git.state.baselines['baseline.json'], baseline);
+	assert.equal(io.files['state.json'], undefined);
+});
+
 test('pull removes a bundle the remote no longer declares', async () => {
 	const remote = manifestOf([row('one', 's1', true)]);
 	const { engine, pm } = makeEngine({

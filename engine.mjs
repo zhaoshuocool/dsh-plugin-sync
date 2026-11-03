@@ -70,8 +70,20 @@ export function createSyncEngine({ git, pm, io, log, machineName, now }) {
 	async function pmCall(applied, errors, label, name, run) {
 		try {
 			const result = await run();
-			if (result && result.ok === false) {
-				errors.push(`${label} ${name}: ${result.error ?? result.message ?? 'pluginManager reported failure'}`);
+			// pluginManager methods resolve ChangeResult; treat a reported
+			// failure (ok:false, application:'failed', or an error record) as
+			// an error. An install racing an already-present package is fine.
+			const failed = result
+				&& (result.ok === false
+					|| (result.application === 'failed' && result.error?.code !== 'already-installed')
+					|| (result.error && result.application === undefined));
+			if (failed) {
+				const detail = result.error
+					? (typeof result.error === 'string'
+						? result.error
+						: `${result.error.code ?? 'pluginManager failure'}${result.error.diagnostic ? `: ${result.error.diagnostic}` : ''}`)
+					: (result.message ?? 'pluginManager reported failure');
+				errors.push(`${label} ${name}: ${detail}`);
 				return false;
 			}
 			applied.push(name);
