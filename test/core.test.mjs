@@ -290,12 +290,14 @@ test('setStatus accepts the UI-facing fields and getStatus echoes them', () => {
 		repo: 'https://github.com/me/private.git',
 		branch: 'main',
 		machineName: 'desk-1',
+		intervalMs: 300000,
 		remoteState: { bundles: [{ name: 'x', source: 's', enabled: true }], updatedAt: '2026-11-03T09:00:00.000Z', updatedBy: 'laptop-2' },
 	});
 	const status = getStatus();
 	assert.equal(status.repo, 'https://github.com/me/private.git');
 	assert.equal(status.branch, 'main');
 	assert.equal(status.machineName, 'desk-1');
+	assert.equal(status.intervalMs, 300000);
 	assert.deepEqual(status.remoteState.bundles, [{ name: 'x', source: 's', enabled: true }]);
 	setStatus({ remoteState: null, repo: null });
 	assert.equal(getStatus().remoteState, null);

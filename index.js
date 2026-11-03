@@ -235,7 +235,7 @@ function readBody(req) {
  * @param accessors - {{ getStatus, getScheduler, getEngine }} live accessors.
  * @returns disposer unregistering every route.
  */
-export function registerRoutes(web, connection, { getStatus, getScheduler, getEngine }) {
+export function registerRoutes(web, connection, { getStatus, getScheduler, getEngine, publish }) {
 	const trusted = (req, res) => {
 		const rejection = connection.requestRejection({ headers: req.headers ?? {} });
 		if (rejection !== undefined) {
@@ -277,6 +277,9 @@ export function registerRoutes(web, connection, { getStatus, getScheduler, getEn
 			return;
 		}
 		const outcome = await run(engine, body);
+		// Publish first: the Settings tab polls the status singleton and must
+		// see the phase leave await-choose as soon as this response lands.
+		if (typeof publish === 'function') publish(outcome, 'pull');
 		sendJson(res, 200, { ok: outcome.action !== 'error', outcome });
 	});
 
@@ -368,11 +371,12 @@ export function apply(ctx, config) {
 			getStatus,
 			getScheduler,
 			getEngine,
+			publish: publishOutcome,
 		});
 
 		const conf = Config(config);
 		if (!conf.repo) {
-			setStatus({ phase: 'disabled', repo: null, branch: conf.branch, machineName: conf.machineName });
+			setStatus({ phase: 'disabled', repo: null, branch: conf.branch, machineName: conf.machineName, intervalMs: conf.pullIntervalMs });
 			return disposeRoutes;
 		}
 
@@ -420,7 +424,7 @@ export function apply(ctx, config) {
 		});
 		activeEngine = engine;
 
-		setStatus({ phase: 'idle', repo: conf.repo, branch: conf.branch, machineName: conf.machineName });
+		setStatus({ phase: 'idle', repo: conf.repo, branch: conf.branch, machineName: conf.machineName, intervalMs: conf.pullIntervalMs });
 
 		const runLogged = (kind) => async () => {
 			setStatus({ phase: 'syncing' });

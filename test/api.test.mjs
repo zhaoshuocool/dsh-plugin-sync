@@ -50,12 +50,14 @@ async function call(route, req) {
 
 function setup({ rejection, scheduler, engine } = {}) {
 	const web = fakeWeb();
+	const published = [];
 	const disposers = registerRoutes(web, fakeConnection(rejection), {
 		getStatus,
 		getScheduler: () => scheduler ?? null,
 		getEngine: () => engine ?? null,
+		publish: (outcome, kind) => published.push({ outcome, kind }),
 	});
-	return { web, disposers };
+	return { web, disposers, published };
 }
 
 test('registers the four exact routes under /api/plugin-sync', () => {
@@ -114,21 +116,24 @@ test('GET on a POST-only route returns 405', async () => {
 
 test('POST bootstrap with an invalid mode returns 4xx and never touches the engine', async () => {
 	let engineCalls = 0;
-	const { web } = setup({ engine: { async bootstrap() { engineCalls += 1; return { action: 'converged', applied: [], errors: [] }; } } });
+	const { web, published } = setup({ engine: { async bootstrap() { engineCalls += 1; return { action: 'converged', applied: [], errors: [] }; } } });
 	const res = await call(web.find(`${BASE}/bootstrap`), makeReq({ method: 'POST', body: { mode: 'local-wins' } }));
 	assert.ok(res.status >= 400 && res.status < 500, `expected 4xx, got ${res.status}`);
 	assert.equal(engineCalls, 0);
+	assert.equal(published.length, 0);
 });
 
 test('POST bootstrap merge awaits the engine and returns its outcome', async () => {
 	const outcome = { action: 'bootstrapped', applied: ['a', 'b'], errors: [] };
 	const seen = [];
-	const { web } = setup({ engine: { async bootstrap(mode) { seen.push(mode); return outcome; } } });
+	const { web, published } = setup({ engine: { async bootstrap(mode) { seen.push(mode); return outcome; } } });
 	const res = await call(web.find(`${BASE}/bootstrap`), makeReq({ method: 'POST', body: { mode: 'merge' } }));
 	assert.deepEqual(seen, ['merge']);
 	assert.equal(res.status, 200);
 	assert.equal(res.json().ok, true);
 	assert.deepEqual(res.json().outcome.applied, ['a', 'b']);
+	assert.deepEqual(published.map(p => p.kind), ['pull'], 'the outcome is published to the status singleton');
+	assert.equal(published[0].outcome, outcome);
 });
 
 test('POST confirm-empty runs engine.confirmEmpty once', async () => {

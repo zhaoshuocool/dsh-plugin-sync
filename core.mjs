@@ -211,6 +211,7 @@ const status = {
 	repo: null,
 	branch: null,
 	machineName: null,
+	intervalMs: null,
 	remoteState: null,
 	lastPullAt: null,
 	lastPushAt: null,
@@ -237,6 +238,7 @@ export function setStatus(patch) {
 	if ('repo' in patch) status.repo = patch.repo ?? null;
 	if ('branch' in patch) status.branch = patch.branch ?? null;
 	if ('machineName' in patch) status.machineName = patch.machineName ?? null;
+	if ('intervalMs' in patch) status.intervalMs = patch.intervalMs ?? null;
 	if ('remoteState' in patch) status.remoteState = patch.remoteState ?? null;
 	if ('lastPullAt' in patch) status.lastPullAt = patch.lastPullAt ?? null;
 	if ('lastPushAt' in patch) status.lastPushAt = patch.lastPushAt ?? null;
