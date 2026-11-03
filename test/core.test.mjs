@@ -284,6 +284,26 @@ test('getStatus exposes documented defaults and setStatus merges a patch', () =>
 	assert.equal(getStatus().phase, 'idle', 'unknown phase values are ignored');
 });
 
+test('setStatus accepts the UI-facing fields and getStatus echoes them', () => {
+	setStatus({
+		phase: 'await-choose',
+		repo: 'https://github.com/me/private.git',
+		branch: 'main',
+		machineName: 'desk-1',
+		remoteState: { bundles: [{ name: 'x', source: 's', enabled: true }], updatedAt: '2026-11-03T09:00:00.000Z', updatedBy: 'laptop-2' },
+	});
+	const status = getStatus();
+	assert.equal(status.repo, 'https://github.com/me/private.git');
+	assert.equal(status.branch, 'main');
+	assert.equal(status.machineName, 'desk-1');
+	assert.deepEqual(status.remoteState.bundles, [{ name: 'x', source: 's', enabled: true }]);
+	setStatus({ remoteState: null, repo: null });
+	assert.equal(getStatus().remoteState, null);
+	assert.equal(getStatus().repo, null);
+	setStatus({ totallyUnknownField: 'x' });
+	assert.equal('totallyUnknownField' in getStatus(), false, 'unknown fields stay out of the snapshot');
+});
+
 test('logStatus appends entries and the log ring drops oldest past 200', () => {
 	const before = getStatus().log.length;
 	for (let i = 0; i < 205; i++) logStatus('info', `msg-${i}`);

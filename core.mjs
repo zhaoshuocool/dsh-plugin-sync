@@ -208,6 +208,10 @@ export function repoHashDir(home, repo) {
 
 const status = {
 	phase: 'disabled',
+	repo: null,
+	branch: null,
+	machineName: null,
+	remoteState: null,
 	lastPullAt: null,
 	lastPushAt: null,
 	error: null,
@@ -223,12 +227,17 @@ export function getStatus() {
 }
 
 /**
- * Merge a patch into the status. Only phase/lastPullAt/lastPushAt/error are
- * accepted; an unknown phase value is ignored.
+ * Merge a patch into the status. Only phase/repo/branch/machineName/
+ * remoteState/lastPullAt/lastPushAt/error are accepted; an unknown phase
+ * value is ignored.
  */
 export function setStatus(patch) {
 	if (patch == null || typeof patch !== 'object') return;
 	if ('phase' in patch && PHASES.includes(patch.phase)) status.phase = patch.phase;
+	if ('repo' in patch) status.repo = patch.repo ?? null;
+	if ('branch' in patch) status.branch = patch.branch ?? null;
+	if ('machineName' in patch) status.machineName = patch.machineName ?? null;
+	if ('remoteState' in patch) status.remoteState = patch.remoteState ?? null;
 	if ('lastPullAt' in patch) status.lastPullAt = patch.lastPullAt ?? null;
 	if ('lastPushAt' in patch) status.lastPushAt = patch.lastPushAt ?? null;
 	if ('error' in patch) status.error = patch.error ?? null;

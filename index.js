@@ -198,6 +198,128 @@ export function createScheduler({ pull, push, intervalMs, debounceMs = 30_000, b
 	};
 }
 
+// --- web API routes -----------------------------------------------------------
+
+/** Base path of this plugin's routes. */
+const BASE = '/api/plugin-sync';
+
+/** Answer one HTTP request with JSON (same idiom as other profile controllers). */
+function sendJson(res, status, body) {
+	res.writeHead(status, {
+		'content-type': 'application/json; charset=utf-8',
+		'cache-control': 'no-store',
+	});
+	res.end(JSON.stringify(body));
+}
+
+/** Read a bounded request body. */
+function readBody(req) {
+	return new Promise((resolve, reject) => {
+		let body = '';
+		req.on('data', (chunk) => {
+			body += chunk.toString('utf8');
+			if (body.length > 8192) reject(new Error('body-too-large'));
+		});
+		req.on('end', () => resolve(body));
+		req.on('error', reject);
+	});
+}
+
+/**
+ * Register the status/control routes on the Web server. Handlers only read
+ * state or trigger the engine/scheduler; they never compute business results
+ * themselves. Every request first passes Connection's trust fence.
+ *
+ * @param web - `ctx.webServer`.
+ * @param connection - `ctx.connection`.
+ * @param accessors - {{ getStatus, getScheduler, getEngine }} live accessors.
+ * @returns disposer unregistering every route.
+ */
+export function registerRoutes(web, connection, { getStatus, getScheduler, getEngine }) {
+	const trusted = (req, res) => {
+		const rejection = connection.requestRejection({ headers: req.headers ?? {} });
+		if (rejection !== undefined) {
+			sendJson(res, rejection, { ok: false, error: rejection === 401 ? 'unauthorized' : 'forbidden' });
+			return false;
+		}
+		return true;
+	};
+
+	const post = (path, run) => ({
+		kind: 'exact',
+		path,
+		handler: async (req, res) => {
+			if (!trusted(req, res)) return;
+			if (req.method !== 'POST') {
+				sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+				return;
+			}
+			let body = {};
+			try {
+				const text = await readBody(req);
+				if (text.trim() !== '') body = JSON.parse(text);
+			} catch {
+				sendJson(res, 400, { ok: false, error: 'invalid-json-body' });
+				return;
+			}
+			try {
+				await run(req, res, body);
+			} catch (error) {
+				sendJson(res, error?.status ?? 500, { ok: false, error: String(error?.message ?? error) });
+			}
+		},
+	});
+
+	const engineRunner = (path, run) => post(path, async (req, res, body) => {
+		const engine = getEngine();
+		if (!engine) {
+			sendJson(res, 503, { ok: false, error: 'sync-not-active' });
+			return;
+		}
+		const outcome = await run(engine, body);
+		sendJson(res, 200, { ok: outcome.action !== 'error', outcome });
+	});
+
+	const routes = [
+		{
+			kind: 'exact',
+			path: `${BASE}/status`,
+			handler: async (req, res) => {
+				if (!trusted(req, res)) return;
+				if (req.method !== 'GET') {
+					sendJson(res, 405, { ok: false, error: 'method-not-allowed' });
+					return;
+				}
+				sendJson(res, 200, getStatus());
+			},
+		},
+		post(`${BASE}/run`, (req, res) => {
+			const scheduler = getScheduler();
+			if (!scheduler) {
+				sendJson(res, 503, { ok: false, error: 'sync-not-active' });
+				return;
+			}
+			void scheduler.runNow();
+			sendJson(res, 200, { ok: true, started: true });
+		}),
+		engineRunner(`${BASE}/bootstrap`, (engine, body) => {
+			const mode = body?.mode;
+			if (mode !== 'remote' && mode !== 'merge') {
+				const error = new Error("mode must be 'remote' or 'merge'");
+				error.status = 400;
+				throw error;
+			}
+			return engine.bootstrap(mode);
+		}),
+		engineRunner(`${BASE}/confirm-empty`, (engine) => engine.confirmEmpty()),
+	];
+
+	const disposers = routes.map(route => web.register(route));
+	return () => {
+		for (const dispose of disposers) dispose();
+	};
+}
+
 // --- apply -------------------------------------------------------------------
 
 /** The engine/scheduler of the active fiber; used by the routes (Task 6). */
@@ -215,31 +337,43 @@ export function getScheduler() {
 }
 
 /** Map one engine outcome onto the shared status singleton for the UI. */
-function publishOutcome(outcome) {
+function publishOutcome(outcome, kind) {
 	const summary = outcome.remoteState
 		? { bundles: outcome.remoteState.bundles, updatedAt: outcome.remoteState.updatedAt, updatedBy: outcome.remoteState.updatedBy }
 		: null;
+	const stamp = {};
+	const at = new Date().toISOString();
+	if (kind === 'pull') stamp.lastPullAt = at;
+	if (kind === 'push') stamp.lastPushAt = at;
 	switch (outcome.action) {
 		case 'await-choose':
-			setStatus({ phase: 'await-choose', remoteState: summary });
+			setStatus({ phase: 'await-choose', remoteState: summary, error: null });
 			break;
 		case 'await-empty-confirm':
-			setStatus({ phase: 'await-empty-confirm', remoteState: summary });
+			setStatus({ phase: 'await-empty-confirm', remoteState: summary, error: null });
 			break;
 		case 'error':
-			setStatus({ phase: 'error', lastError: outcome.errors.join('; '), remoteState: summary });
+			setStatus({ phase: 'error', error: outcome.errors.join('; '), remoteState: summary, ...stamp });
 			break;
 		default:
-			setStatus({ phase: 'idle', lastError: null, remoteState: summary });
+			setStatus({ phase: 'idle', error: null, remoteState: summary ?? getStatus().remoteState, ...stamp });
 	}
 }
 
 export function apply(ctx, config) {
 	return ctx.effect(() => {
+		// Routes answer even while sync is disabled, so the Settings tab always
+		// has something to read.
+		const disposeRoutes = registerRoutes(ctx.webServer, ctx.connection, {
+			getStatus,
+			getScheduler,
+			getEngine,
+		});
+
 		const conf = Config(config);
 		if (!conf.repo) {
 			setStatus({ phase: 'disabled', repo: null, branch: conf.branch, machineName: conf.machineName });
-			return;
+			return disposeRoutes;
 		}
 
 		const dshHome = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
@@ -292,11 +426,11 @@ export function apply(ctx, config) {
 			setStatus({ phase: 'syncing' });
 			try {
 				const outcome = await engine[kind]();
-				publishOutcome(outcome);
+				publishOutcome(outcome, kind);
 				return outcome;
 			} catch (error) {
 				log('error', `${kind} failed: ${error?.message ?? error}`);
-				setStatus({ phase: 'error', lastError: String(error?.message ?? error) });
+				setStatus({ phase: 'error', error: String(error?.message ?? error) });
 			}
 		};
 
@@ -368,6 +502,7 @@ export function apply(ctx, config) {
 			controller.abort();
 			for (const close of watcherCloses) void close().catch(() => {});
 			if (fallbackTimer) fallbackTimer();
+			disposeRoutes();
 			if (activeEngine === engine) {
 				activeEngine = null;
 				activeScheduler = null;
