@@ -17,7 +17,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 import { createSyncEngine } from './engine.mjs';
 import { createGitOps } from './git.mjs';
-import { repoHashDir, setStatus, logStatus } from './core.mjs';
+import { getStatus, repoHashDir, setStatus, logStatus } from './core.mjs';
 
 export const inject = ['pluginManager', 'fs', 'subprocess', 'webServer', 'timer', 'connection'];
 
@@ -461,6 +461,12 @@ export function apply(ctx, config) {
 		// debounced push. If the watcher cannot start, poll the local bundle
 		// snapshot every 60s instead.
 		const controller = new AbortController();
+		// A watcher disposer may return void or a promise; await both shapes.
+		const closeQuietly = async (close) => {
+			try {
+				await close();
+			} catch { /* the watcher is already gone */ }
+		};
 		const profileDir = process.env.DSH_PROFILE_DIR
 			?? path.join(dshHome, 'profiles', process.env.DSH_PROFILE ?? 'local');
 		let watcherCloses = [];
@@ -488,13 +494,13 @@ export function apply(ctx, config) {
 					closes.push(await ctx.fs.watch(target, () => scheduler.triggerPush(), controller.signal));
 				}
 			} catch (error) {
-				for (const close of closes) await close().catch(() => {});
+				for (const close of closes) await closeQuietly(close);
 				log('warn', `profile watch unavailable (${error?.message ?? error}); polling the local snapshot every 60s`);
 				if (!disposed) startFallbackPolling();
 				return;
 			}
 			if (disposed) {
-				for (const close of closes) await close().catch(() => {});
+				for (const close of closes) await closeQuietly(close);
 				return;
 			}
 			watcherCloses = closes;
@@ -504,7 +510,7 @@ export function apply(ctx, config) {
 			disposed = true;
 			scheduler.stop();
 			controller.abort();
-			for (const close of watcherCloses) void close().catch(() => {});
+			for (const close of watcherCloses) void closeQuietly(close);
 			if (fallbackTimer) fallbackTimer();
 			disposeRoutes();
 			if (activeEngine === engine) {
