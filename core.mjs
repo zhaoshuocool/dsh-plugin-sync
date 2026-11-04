@@ -91,30 +91,24 @@ export function bundlesFromList(bundles) {
 }
 
 /**
- * Read the shape of an npm range: a pinned version, a range with a boundary
- * version (`^1.2.3`, `~1.2`, `>=1.0`, `1.x`, `1.x - 2`), or a floating marker
- * (`latest`, `next`, `*`) that names no version at all.
+ * Read the shape of an npm range: `pin` (one version), `caret`, `tilde`, `range`
+ * (`1.x`, `1.2 - 2`, anything with trailing text), or `floating` (`latest`,
+ * `next`, `*`) which names no version at all.
  */
 function specShape(name, range) {
+	const tripleOf = m => [Number(m[2]), Number(m[3] ?? 0), Number(m[4] ?? 0)];
+	const kindOf = m => {
+		if (m[1] === '^') return 'caret';
+		if (m[1] === '~') return 'tilde';
+		return m[3] !== undefined && m[4] !== undefined ? 'pin' : 'range';
+	};
 	const exact = /^(\^|~)?v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(range);
-	if (exact) {
-		return {
-			name,
-			pin: exact[1] === undefined,
-			triple: [Number(exact[2]), Number(exact[3] ?? 0), Number(exact[4] ?? 0)],
-			floating: false,
-		};
-	}
+	if (exact) return { name, kind: kindOf(exact), triple: tripleOf(exact) };
 	const lead = /^(\^|~)?v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(range);
-	if (lead) {
-		return {
-			name,
-			pin: false,
-			triple: [Number(lead[2]), Number(lead[3] ?? 0), Number(lead[4] ?? 0)],
-			floating: false,
-		};
-	}
-	return { name, pin: false, triple: null, floating: true };
+	// Trailing text after the version (`1.x`, `1.2 - 2`, a prerelease) makes the
+	// range open rather than a pin.
+	if (lead) return { name, kind: 'range', triple: tripleOf(lead) };
+	return { name, kind: 'floating', triple: null };
 }
 
 /**
@@ -130,7 +124,7 @@ function npmSpec(source) {
 	// source here. An arbitrary word is some other transport's identifier, and
 	// guessing it is "the same package" would be worse than comparing strings.
 	const bare = specShape(null, source);
-	return bare.floating ? null : bare;
+	return bare.kind === 'floating' ? null : bare;
 }
 
 const sameTriple = (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
@@ -163,8 +157,8 @@ export function sourcesEquivalent(a, b) {
 	const other = npmSpec(b);
 	if (one === null || other === null) return false;
 	if (one.name !== other.name) return false;
-	if (one.floating || other.floating) return true;
-	if (one.pin || other.pin) return sameTriple(one.triple, other.triple);
+	if (one.kind === 'floating' || other.kind === 'floating') return true;
+	if (one.kind === 'pin' || other.kind === 'pin') return sameTriple(one.triple, other.triple);
 	return one.triple[0] === other.triple[0];
 }
 
@@ -279,6 +273,102 @@ export function isShrinkingToEmpty(localCount, remoteBundles) {
 	return localCount > 0 && (remoteBundles?.length ?? 0) === 0;
 }
 
+// --- update checking ---------------------------------------------------------
+
+/**
+ * Installed version per bundle name, straight from the host's bundle rows.
+ * Kept apart from the sync entries on purpose: the manifest's entries stay
+ * `{ name, source, enabled }` and never carry a machine's resolved version.
+ */
+export function installedVersionsFromList(rows) {
+	const versions = {};
+	for (const row of rows ?? []) {
+		if (row?.installed === true && typeof row.name === 'string' && typeof row.version === 'string' && row.version !== '') {
+			versions[row.name] = row.version;
+		}
+	}
+	return versions;
+}
+
+function parseVersion(text) {
+	const match = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+](.*))?$/.exec(String(text ?? ''));
+	if (!match) return null;
+	return {
+		triple: [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)],
+		prerelease: match[4] ?? null,
+	};
+}
+
+function compareTriples(a, b) {
+	for (let index = 0; index < 3; index += 1) {
+		if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+	}
+	return 0;
+}
+
+/**
+ * -1, 0 or 1. An unparseable version compares equal, so an odd version string
+ * never buys an upgrade. A prerelease ranks below the release it precedes.
+ */
+export function semverCompare(a, b) {
+	const one = parseVersion(a);
+	const other = parseVersion(b);
+	if (one === null || other === null) return 0;
+	const byTriple = compareTriples(one.triple, other.triple);
+	if (byTriple !== 0) return byTriple;
+	if (one.prerelease === other.prerelease) return 0;
+	if (one.prerelease !== null) return -1;
+	return 1;
+}
+
+/**
+ * Would installing this range pick `version`? An exact pin says one version;
+ * a caret stays in its major (and in its minor for 0.x, as npm does); a tilde
+ * stays in its minor. Anything open (`latest`, `*`, `>=…`, `1.x`) is taken at
+ * face value, and so is anything that is not an npm range at all — the
+ * installer knows better than this parser.
+ */
+export function rangeAccepts(spec, version) {
+	const shape = npmSpec(spec);
+	if (shape === null || shape.kind === 'floating' || shape.kind === 'range') return true;
+	const target = parseVersion(version);
+	if (target === null) return false;
+	if (shape.kind === 'pin') return compareTriples(shape.triple, target.triple) === 0 && target.prerelease === null;
+	if (compareTriples(target.triple, shape.triple) < 0) return false;
+	const [major, minor] = shape.triple;
+	const [targetMajor, targetMinor] = target.triple;
+	if (shape.kind === 'caret') return major > 0 ? targetMajor === major : targetMajor === 0 && targetMinor === minor;
+	return targetMajor === major && targetMinor === minor;
+}
+
+/** True when a source is a plain npm install spec rather than a transport URL or path. */
+export function isNpmSource(source) {
+	return npmSpec(source) !== null;
+}
+
+/**
+ * Which npm bundles the registry says are newer, and only where the manifest's
+ * own range would actually pick that version — an exact pin is someone's
+ * decision, and this plugin does not overrule it. The `spec` returned is the
+ * manifest's source, so an update re-installs under the same range semantics
+ * rather than rewriting the manifest behind the user's back.
+ */
+export function planUpdates(entries, installedVersions, latestByName, opts = {}) {
+	const self = opts.selfName ?? null;
+	const updates = [];
+	for (const entry of entries ?? []) {
+		if (!entry || typeof entry.name !== 'string' || entry.name === self) continue;
+		if (npmSpec(entry.source) === null) continue;
+		const from = installedVersions?.[entry.name];
+		const to = latestByName?.[entry.name];
+		if (typeof from !== 'string' || typeof to !== 'string') continue;
+		if (semverCompare(to, from) <= 0) continue;
+		if (!rangeAccepts(entry.source, to)) continue;
+		updates.push({ name: entry.name, from, to, spec: entry.source });
+	}
+	return updates;
+}
+
 /**
  * Local sync-state directory for a repo: <home>/plugin-sync/<sha256(repo)[:16]>.
  */
@@ -296,6 +386,9 @@ const status = {
 	proxy: null,
 	machineName: null,
 	intervalMs: null,
+	updatePolicy: null,
+	updates: null,
+	lastUpdateCheckAt: null,
 	remoteState: null,
 	lastPullAt: null,
 	lastPushAt: null,

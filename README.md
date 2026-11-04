@@ -49,12 +49,38 @@ profile 的插件 bundle 清单（安装了哪些 bundle、各自是否启用）
 - `POST /api/plugin-sync/run` — 立即执行一轮 pull+push
 - `POST /api/plugin-sync/bootstrap` — `{ "mode": "remote" | "merge" }`
 - `POST /api/plugin-sync/confirm-empty`
-- `POST /api/plugin-sync/config` — `{ repo?, branch?, pullIntervalMs?, machineName?, proxy? }`；
+- `POST /api/plugin-sync/config` — `{ repo?, branch?, pullIntervalMs?, machineName?, proxy?, updatePolicy? }`；
   经 `configEditor` 服务写入 profile 的 `cordis.patch.yml` 并按 Loader 正常路径热生效，
   与手工编辑 YAML 等价（`repo: null` 或空字符串 = 清除 = 停用同步）
+- `POST /api/plugin-sync/check-updates` — 立刻查一次 registry（绕过 24 小时缓存）
+- `POST /api/plugin-sync/update` — `{ "names": ["包名", …] }`，空数组 = 全部可升级项
 
 因此配置也可以**全部在设置页里完成**：填写仓库/分支/间隔 → 保存。README 顶部的
 YAML 片段是给习惯命令行的人的等价写法。
+
+## 更新检查（`updatePolicy`）
+
+插件可选地查询 npm registry，看哪些**已安装的 npm 来源**有更新版本：
+
+| `updatePolicy` | 行为 |
+| --- | --- |
+| `off`（默认） | 完全不联网查询，与本功能之前一致 |
+| `check` | 每 24 小时查一次，把可升级项列在设置页，由人点「升级」 |
+| `auto` | 查到就直接升级（先 `remove_bundle` 再 `install_bundle`） |
+
+规则要点：
+
+- 只处理 npm 来源。`github:` / `file:` / `link:` 一类来源不查询、不升级。
+- **不会升级插件自己**（`dsh-plugin-sync` 永远跳过），避免升级中途把自己卸掉。
+- 只在清单里的 range **确实会挑中**新版本时才升级：`^1.2.24` 遇到 `1.2.29` 会升；
+  钉死成 `1.2.24` 是人下的决定，插件不越权；`^1.2.24` 也不会被升到 `2.x`。
+- 升级用的仍是清单里原有的 `source`，不改写清单。因此同 major 内的升级**不会自动
+  传播到其他机器**；要把某个版本带到别的机器，就在设置页/清单里钉一个确切版本。
+- 一次成功升级会记账：若 registry 仍报同一版本（缓存滞后或解析受限），不会每个周期
+  反复装卸。
+- 查询失败（离线、registry 不可达）只写日志，不影响同步与安装。
+- 走 `proxy` 配置：`http(s)` 代理用 CONNECT 建隧道后再 TLS，代理不可用时报错而不是
+  偷偷直连。registry 地址固定 `https://registry.npmjs.org`。
 
 ## 实现要点
 
@@ -123,3 +149,9 @@ YAML 片段是给习惯命令行的人的等价写法。
    记账，事务执行中再发起 pluginManager 变更会被拒。00:05 / 00:10 两轮的 remove 撞的就是
    这条，宿主重启后同一个 remove 在 09:02 正常完成——是执行上下文问题，不是清单损坏，
    插件侧也没有可靠绕法；第 5 条修掉每轮重装后就不再触发它。
+7. **新增：更新检查（2026-11-04）**：见上文「更新检查（`updatePolicy`）」。实现分四块：
+   `registry.mjs` 是零依赖的 registry 客户端（`https` 请求，代理时先 CONNECT 隧道再 TLS，
+   隧道断或被拒一定报错，不会退化成直连）；`core.mjs` 的 `semverCompare` / `rangeAccepts` /
+   `planUpdates` 只判断该不该升（精确 pin 不动，range 挑不中的版本不升）；`engine.mjs` 按策略
+   与 24 小时缓存执行，升级复用已有的 remove+install 原语，并记账避免重复装卸；设置页多一个
+   策略下拉与「可升级」列表。测试 104 → 134 条，全绿。

@@ -68,6 +68,8 @@ test('apply without a repo runs disabled but still serves the status route', asy
 		'/api/plugin-sync/run',
 		'/api/plugin-sync/bootstrap',
 		'/api/plugin-sync/confirm-empty',
+		'/api/plugin-sync/check-updates',
+		'/api/plugin-sync/update',
 		'/api/plugin-sync/config',
 	]);
 	const response = await callStatusRoute(ctx);

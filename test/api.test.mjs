@@ -61,7 +61,7 @@ function setup({ rejection, scheduler, engine, saveConfig } = {}) {
 	return { web, disposers, published };
 }
 
-test('registers the five exact routes under /api/plugin-sync', () => {
+test('registers the seven exact routes under /api/plugin-sync', () => {
 	const { web } = setup();
 	assert.deepEqual(
 		web.routes.map(r => [r.kind, r.path]),
@@ -70,9 +70,44 @@ test('registers the five exact routes under /api/plugin-sync', () => {
 			['exact', `${BASE}/run`],
 			['exact', `${BASE}/bootstrap`],
 			['exact', `${BASE}/confirm-empty`],
+			['exact', `${BASE}/check-updates`],
+			['exact', `${BASE}/update`],
 			['exact', `${BASE}/config`],
 		],
 	);
+});
+
+test('check-updates and update drive the engine and publish with kind update', async () => {
+	const calls = [];
+	const engine = {
+		async checkUpdates() {
+			calls.push(['check']);
+			return { updates: [{ name: 'mgr', from: '1.2.26', to: '1.2.29', spec: 'mgr@^1.2.24' }] };
+		},
+		async applyUpdates(names) {
+			calls.push(['apply', names]);
+			return { action: 'updated', applied: ['mgr'], errors: [], updates: [] };
+		},
+	};
+	const { web, published } = setup({ engine });
+	const checked = await call(web.find(`${BASE}/check-updates`), makeReq({ method: 'POST', body: {} }));
+	assert.equal(checked.status, 200);
+	assert.deepEqual(checked.json().updates, [{ name: 'mgr', from: '1.2.26', to: '1.2.29', spec: 'mgr@^1.2.24' }]);
+	const applied = await call(web.find(`${BASE}/update`), makeReq({ method: 'POST', body: { names: ['mgr', 7] } }));
+	assert.equal(applied.status, 200);
+	assert.equal(applied.json().ok, true);
+	assert.deepEqual(calls, [['check'], ['apply', ['mgr']]], 'non-string names are dropped');
+	assert.deepEqual(published.map(p => p.kind), ['update', 'update'], 'these do not stamp a pull/push time');
+	assert.deepEqual(published[0].outcome.updates, [{ name: 'mgr', from: '1.2.26', to: '1.2.29', spec: 'mgr@^1.2.24' }]);
+});
+
+test('the update routes answer 503 while sync is not active', async () => {
+	const { web } = setup();
+	for (const path of [`${BASE}/check-updates`, `${BASE}/update`]) {
+		const res = await call(web.find(path), makeReq({ method: 'POST', body: {} }));
+		assert.equal(res.status, 503, path);
+		assert.equal(res.json().error, 'sync-not-active');
+	}
 });
 
 test('GET status returns the live status JSON including remoteState summary', async () => {

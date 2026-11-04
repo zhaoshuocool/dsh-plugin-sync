@@ -14,10 +14,15 @@ import {
 	planConvergence,
 	isShrinkingToEmpty,
 	sourcesEquivalent,
+	installedVersionsFromList,
+	planUpdates,
+	isNpmSource,
 } from './core.mjs';
 
 const BASELINE = 'baseline.json';
 const STATE = 'state.json';
+const UPDATE_STATE = 'update-state.json';
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function render(manifest) {
 	return JSON.stringify(manifest, null, 2);
@@ -42,10 +47,17 @@ function sameBundles(a, b) {
  *         removeBundle(name: string): Promise<object>, setBundleEnabled(name: string, enabled: boolean): Promise<object> },
  *   io: { readJson(path: string): Promise<object|null>, writeJson(path: string, obj: object): Promise<void> },
  *   log(level: string, msg: string): void, machineName: string, now(): string,
- *   selfName?: string (the sync bundle's own name; excluded from self-mutating actions)
+ *   selfName?: string (the sync bundle's own name; excluded from self-mutating actions),
+ *   updatePolicy?: 'off' | 'check' | 'auto',
+ *   checkRegistry?: (names: string[]) => Promise<{ ok: {name,latest}[], failed: {name,error}[] }>
  * }}
  */
-export function createSyncEngine({ git, pm, io, log, machineName, now, selfName = null }) {
+export function createSyncEngine({
+	git, pm, io, log, machineName, now,
+	selfName = null,
+	updatePolicy = 'off',
+	checkRegistry = null,
+}) {
 	let emptyConfirmed = false;
 
 	function outcome(action, { applied = [], errors = [], remoteState } = {}) {
@@ -132,6 +144,91 @@ export function createSyncEngine({ git, pm, io, log, machineName, now, selfName 
 		return plan;
 	}
 
+	// --- update checking -----------------------------------------------------
+
+	let updateState = null;
+
+	async function loadUpdateState() {
+		if (updateState !== null) return updateState;
+		try {
+			const saved = await io.readJson(UPDATE_STATE);
+			updateState = saved && typeof saved === 'object' ? saved : {};
+		} catch (error) {
+			log('warn', `update state read failed: ${error?.message ?? error}`);
+			updateState = {};
+		}
+		return updateState;
+	}
+
+	async function saveUpdateState(state) {
+		updateState = state;
+		try {
+			await io.writeJson(UPDATE_STATE, state);
+		} catch (error) {
+			log('warn', `update state write failed: ${error?.message ?? error}`);
+		}
+	}
+
+	function dueForCheck(state) {
+		if (!state.checkedAt) return true;
+		const then = Date.parse(state.checkedAt);
+		const at = Date.parse(now());
+		if (!Number.isFinite(then) || !Number.isFinite(at)) return true;
+		return at - then >= UPDATE_CHECK_INTERVAL_MS;
+	}
+
+	/** Ask the registry which npm bundles have a newer version. Mutates nothing. */
+	async function checkForUpdates(rows, { force = false } = {}) {
+		const state = await loadUpdateState();
+		if (!force && !dueForCheck(state)) return { updates: state.updates ?? [], cached: true };
+		const entries = bundlesFromList(rows);
+		const versions = installedVersionsFromList(rows);
+		const names = entries
+			.filter(entry => isNpmSource(entry.source) && entry.name !== selfName && versions[entry.name])
+			.map(entry => entry.name);
+		if (names.length === 0) {
+			await saveUpdateState({ ...state, checkedAt: now(), updates: [] });
+			return { updates: [] };
+		}
+		let registry;
+		try {
+			registry = await checkRegistry(names);
+		} catch (error) {
+			log('warn', `update check failed: ${error?.message ?? error}`);
+			return { updates: state.updates ?? [], error: error?.message ?? String(error) };
+		}
+		const latestByName = {};
+		for (const item of registry?.ok ?? []) latestByName[item.name] = item.latest;
+		for (const failure of registry?.failed ?? []) log('warn', `update check: ${failure.name}: ${failure.error}`);
+		const attempted = state.attempted ?? {};
+		const updates = planUpdates(entries, versions, latestByName, { selfName })
+			.filter(update => attempted[update.name]?.to !== update.to);
+		await saveUpdateState({ ...state, checkedAt: now(), updates });
+		return { updates };
+	}
+
+	/**
+	 * Move bundles to the newer version: remove, then install under the source the
+	 * manifest already carries. A fully successful attempt is recorded, so a
+	 * registry that keeps naming a version this machine cannot resolve does not
+	 * buy the same remove+install on every cycle.
+	 */
+	async function applyUpdateList(list, applied, errors) {
+		for (const update of list) {
+			const steps = [];
+			const removed = await pmCall(steps, errors, 'update', update.name, () => pm.removeBundle(update.name));
+			if (removed) await pmCall(steps, errors, 'update', update.name, () => pm.installBundle(update.spec));
+			if (steps.length !== 2) continue;
+			applied.push(update.name);
+			const state = await loadUpdateState();
+			await saveUpdateState({
+				...state,
+				attempted: { ...(state.attempted ?? {}), [update.name]: { to: update.to, at: now() } },
+			});
+			log('info', `updated ${update.name} ${update.from} → ${update.to}`);
+		}
+	}
+
 	function commitMessage(kind, summary) {
 		return `sync(${kind}): ${machineName} ${summary} @ ${now()}`;
 	}
@@ -157,7 +254,7 @@ export function createSyncEngine({ git, pm, io, log, machineName, now, selfName 
 		return outcome('bootstrapped', { applied: local.map(e => e.name), remoteState });
 	}
 
-	async function pull() {
+	async function syncOnce() {
 		const confirmed = emptyConfirmed;
 		emptyConfirmed = false;
 		await git.ensureWorkspace();
@@ -210,6 +307,62 @@ export function createSyncEngine({ git, pm, io, log, machineName, now, selfName 
 			return outcome('error', { applied, errors, remoteState: remote });
 		}
 		return outcome(didSomething ? 'converged' : 'nochange', { applied, remoteState: remote });
+	}
+
+	/**
+	 * A sync cycle, then the update pass when the policy asks for one. The pass is
+	 * kept out of the convergence path on purpose: an available update never
+	 * changes what convergence decided, and it does not act at all when the
+	 * convergence itself failed.
+	 */
+	async function pull() {
+		const result = await syncOnce();
+		if (updatePolicy === 'off' || typeof checkRegistry !== 'function') return result;
+		let rows;
+		try {
+			rows = await pm.listBundles();
+		} catch {
+			return result;
+		}
+		const { updates } = await checkForUpdates(rows, { force: false });
+		const applied = [...(result.applied ?? [])];
+		const errors = [...(result.errors ?? [])];
+		if (updatePolicy === 'auto' && updates.length > 0 && errors.length === 0) {
+			await applyUpdateList(updates, applied, errors);
+		}
+		return { ...result, applied, errors, updates };
+	}
+
+	/** Force a registry check now, bypassing the daily cache. */
+	async function checkUpdates() {
+		if (typeof checkRegistry !== 'function') return { updates: [], error: 'no registry client' };
+		const rows = await pm.listBundles();
+		return await checkForUpdates(rows, { force: true });
+	}
+
+	/**
+	 * Apply the named available updates (all of them when `names` is empty). A
+	 * stored list is used when it is current; otherwise a check runs first, so the
+	 * Settings button works straight after a restart.
+	 */
+	async function applyUpdates(names = []) {
+		if (typeof checkRegistry !== 'function') return outcome('error', { errors: ['no registry client'] });
+		const state = await loadUpdateState();
+		let known = state.updates ?? [];
+		const wanted = names.length > 0 ? known.filter(update => names.includes(update.name)) : known;
+		if (wanted.length === 0) {
+			known = (await checkUpdates()).updates ?? [];
+		}
+		const picked = names.length > 0 ? known.filter(update => names.includes(update.name)) : known;
+		const applied = [];
+		const errors = [];
+		await applyUpdateList(picked, applied, errors);
+		return {
+			action: applied.length > 0 ? 'updated' : 'nochange',
+			applied,
+			errors,
+			updates: known,
+		};
 	}
 
 	async function push() {
@@ -313,5 +466,5 @@ export function createSyncEngine({ git, pm, io, log, machineName, now, selfName 
 		return await pull();
 	}
 
-	return { pull, push, bootstrap, confirmEmpty };
+	return { pull, push, bootstrap, confirmEmpty, checkUpdates, applyUpdates };
 }

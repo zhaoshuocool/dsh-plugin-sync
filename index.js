@@ -17,6 +17,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 import { createSyncEngine } from './engine.mjs';
 import { createGitOps } from './git.mjs';
+import { latestVersions } from './registry.mjs';
 import { getStatus, repoHashDir, setStatus, logStatus } from './core.mjs';
 
 export const inject = ['pluginManager', 'fs', 'subprocess', 'webServer', 'timer', 'connection', 'configEditor'];
@@ -26,7 +27,8 @@ export const inject = ['pluginManager', 'fs', 'subprocess', 'webServer', 'timer'
 /** Accepted repo forms: URL schemes git understands, or absolute local paths. */
 const REPO_PATTERN = /^(https?:\/\/|ssh:\/\/|git:\/\/|git\+|file:\/\/|git@[\w.-]+:|[A-Za-z]:[\\/]|\/)/;
 
-const FIELD_KEYS = new Set(['repo', 'branch', 'pullIntervalMs', 'machineName', 'proxy']);
+const FIELD_KEYS = new Set(['repo', 'branch', 'pullIntervalMs', 'machineName', 'proxy', 'updatePolicy']);
+const UPDATE_POLICIES = new Set(['off', 'check', 'auto']);
 
 /**
  * Proxy URL schemes Git's HTTP transport understands. Desktop apps usually get
@@ -115,8 +117,15 @@ function parseConfig(data) {
 		}
 	}
 
+	let updatePolicy = 'off';
+	if (source.updatePolicy !== undefined && source.updatePolicy !== null) {
+		if (typeof source.updatePolicy !== 'string' || !UPDATE_POLICIES.has(source.updatePolicy)) {
+			issues.push({ path: ['updatePolicy'], message: `updatePolicy must be one of ${[...UPDATE_POLICIES].join('/')}` });
+		} else updatePolicy = source.updatePolicy;
+	}
+
 	if (issues.length) throw new SyncConfigError(issues);
-	return { repo, branch, pullIntervalMs, machineName, proxy };
+	return { repo, branch, pullIntervalMs, machineName, proxy, updatePolicy };
 }
 
 /**
@@ -306,7 +315,7 @@ export function registerRoutes(web, connection, { getStatus, getScheduler, getEn
 		},
 	});
 
-	const engineRunner = (path, run) => post(path, async (req, res, body) => {
+	const engineRunner = (path, run, kind = 'pull') => post(path, async (req, res, body) => {
 		const engine = getEngine();
 		if (!engine) {
 			sendJson(res, 503, { ok: false, error: 'sync-not-active' });
@@ -315,7 +324,7 @@ export function registerRoutes(web, connection, { getStatus, getScheduler, getEn
 		const outcome = await run(engine, body);
 		// Publish first: the Settings tab polls the status singleton and must
 		// see the phase leave await-choose as soon as this response lands.
-		if (typeof publish === 'function') publish(outcome, 'pull');
+		if (typeof publish === 'function') publish(outcome, kind);
 		sendJson(res, 200, { ok: outcome.action !== 'error', outcome });
 	});
 
@@ -351,6 +360,28 @@ export function registerRoutes(web, connection, { getStatus, getScheduler, getEn
 			return engine.bootstrap(mode);
 		}),
 		engineRunner(`${BASE}/confirm-empty`, (engine) => engine.confirmEmpty()),
+		// `check` policy surfaces the list here; the Settings tab's button posts to
+		// one of these two. Neither stamps a pull/push time: they do not sync.
+		post(`${BASE}/check-updates`, async (req, res) => {
+			const engine = getEngine();
+			if (!engine) {
+				sendJson(res, 503, { ok: false, error: 'sync-not-active' });
+				return;
+			}
+			const result = await engine.checkUpdates();
+			if (typeof publish === 'function') {
+				publish({ action: 'nochange', applied: [], errors: [], updates: result.updates }, 'update');
+			}
+			sendJson(res, 200, {
+				ok: result.error === undefined,
+				updates: result.updates ?? [],
+				...(result.error !== undefined ? { error: result.error } : {}),
+			});
+		}),
+		engineRunner(`${BASE}/update`, (engine, body) => {
+			const names = Array.isArray(body?.names) ? body.names.filter(name => typeof name === 'string') : [];
+			return engine.applyUpdates(names);
+		}, 'update'),
 		post(`${BASE}/config`, async (req, res, body) => {
 			if (typeof saveConfig !== 'function') {
 				sendJson(res, 503, { ok: false, error: 'config-editor-unavailable' });
@@ -418,12 +449,18 @@ function publishOutcome(outcome, kind) {
 	const at = new Date().toISOString();
 	if (kind === 'pull') stamp.lastPullAt = at;
 	if (kind === 'push') stamp.lastPushAt = at;
+	// The update pass reports its list on every pull; carry it into the status the
+	// Settings tab reads, so `check` policy is visible without digging in logs.
+	if (outcome.updates !== undefined) {
+		stamp.updates = outcome.updates;
+		stamp.lastUpdateCheckAt = at;
+	}
 	switch (outcome.action) {
 		case 'await-choose':
-			setStatus({ phase: 'await-choose', remoteState: summary, error: null });
+			setStatus({ phase: 'await-choose', remoteState: summary, error: null, ...stamp });
 			break;
 		case 'await-empty-confirm':
-			setStatus({ phase: 'await-empty-confirm', remoteState: summary, error: null });
+			setStatus({ phase: 'await-empty-confirm', remoteState: summary, error: null, ...stamp });
 			break;
 		case 'error':
 			setStatus({ phase: 'error', error: outcome.errors.join('; '), remoteState: summary, ...stamp });
@@ -483,7 +520,7 @@ export function apply(ctx, config) {
 
 		const conf = Config(config);
 		if (!conf.repo) {
-			setStatus({ phase: 'disabled', repo: null, branch: conf.branch, proxy: conf.proxy, machineName: conf.machineName, intervalMs: conf.pullIntervalMs });
+			setStatus({ phase: 'disabled', repo: null, branch: conf.branch, proxy: conf.proxy, machineName: conf.machineName, intervalMs: conf.pullIntervalMs, updatePolicy: conf.updatePolicy });
 			return disposeRoutes;
 		}
 
@@ -530,10 +567,14 @@ export function apply(ctx, config) {
 			machineName: conf.machineName,
 			now: () => new Date().toISOString(),
 			selfName: PACKAGE_NAME,
+			updatePolicy: conf.updatePolicy,
+			// Only wired when the policy asks for it: with `off` the plugin never
+			// opens a registry connection, exactly as before this feature.
+			...(conf.updatePolicy === 'off' ? {} : { checkRegistry: names => latestVersions(names, { proxy: conf.proxy }) }),
 		});
 		activeEngine = engine;
 
-		setStatus({ phase: 'idle', repo: conf.repo, branch: conf.branch, proxy: conf.proxy, machineName: conf.machineName, intervalMs: conf.pullIntervalMs });
+		setStatus({ phase: 'idle', repo: conf.repo, branch: conf.branch, proxy: conf.proxy, machineName: conf.machineName, intervalMs: conf.pullIntervalMs, updatePolicy: conf.updatePolicy });
 
 		const runLogged = (kind) => async () => {
 			setStatus({ phase: 'syncing' });

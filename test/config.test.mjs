@@ -12,7 +12,26 @@ test('Config applies every default to an empty object', () => {
 		pullIntervalMs: 300000,
 		machineName: os.hostname(),
 		proxy: null,
+		updatePolicy: 'off',
 	});
+});
+
+test('Config accepts each update policy and defaults to off', () => {
+	assert.equal(Config({}).updatePolicy, 'off');
+	assert.equal(Config({ updatePolicy: null }).updatePolicy, 'off');
+	for (const policy of ['off', 'check', 'auto']) {
+		assert.equal(Config({ updatePolicy: policy }).updatePolicy, policy, policy);
+	}
+});
+
+test('Config rejects an unknown update policy', () => {
+	for (const policy of ['yes', 'ON', '', 1]) {
+		assert.throws(
+			() => Config({ updatePolicy: policy }),
+			error => error.issues?.some(issue => issue.path[0] === 'updatePolicy'),
+			`updatePolicy=${String(policy)} should be rejected`,
+		);
+	}
 });
 
 test('Config tolerates undefined/missing row config', () => {

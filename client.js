@@ -50,6 +50,15 @@ window.__ModuleLoader__.load({
         branchLabel: 'Branch',
         proxyLabel: 'Proxy',
         proxyPlaceholder: 'blank = no proxy, e.g. http://127.0.0.1:10808',
+        policyLabel: 'Update check',
+        policyOff: 'off — never look',
+        policyCheck: 'check — list them, I decide',
+        policyAuto: 'auto — install what is newer',
+        updatesTitle: 'Updates available',
+        updatesNone: 'nothing newer on the registry',
+        updatesHint: 'updating removes the bundle and installs it again under the source the manifest already carries',
+        checkUpdates: 'Check now',
+        updateAll: 'Update',
         intervalLabel: 'Pull interval',
         minUnit: 'min',
         configHint: 'Saved changes are written to this profile’s cordis.patch.yml and take effect immediately.',
@@ -100,6 +109,15 @@ window.__ModuleLoader__.load({
         branchLabel: '分支',
         proxyLabel: '代理',
         proxyPlaceholder: '留空 = 不走代理，例如 http://127.0.0.1:10808',
+        policyLabel: '更新检查',
+        policyOff: '关闭 — 不查',
+        policyCheck: '检查 — 列出来我定',
+        policyAuto: '自动 — 有新版就装',
+        updatesTitle: '可升级',
+        updatesNone: 'registry 上没有更新的版本',
+        updatesHint: '升级会按清单里原有的 source 先移除再重装该 bundle',
+        checkUpdates: '现在检查',
+        updateAll: '升级',
         intervalLabel: '拉取间隔',
         minUnit: '分钟',
         configHint: '保存后写入本配置档案的 cordis.patch.yml，立即生效。',
@@ -129,6 +147,8 @@ window.__ModuleLoader__.load({
     const BOOTSTRAP_URL = '/api/plugin-sync/bootstrap';
     const CONFIRM_EMPTY_URL = '/api/plugin-sync/confirm-empty';
     const CONFIG_URL = '/api/plugin-sync/config';
+    const CHECK_URL = '/api/plugin-sync/check-updates';
+    const UPDATE_URL = '/api/plugin-sync/update';
 
     /** Read the current sync status from the Host. */
     async function readStatus() {
@@ -321,6 +341,7 @@ window.__ModuleLoader__.load({
         const repoValue = (draft && draft.repo !== undefined) ? draft.repo : (status?.repo ?? '');
         const branchValue = (draft && draft.branch !== undefined) ? draft.branch : (status?.branch || 'main');
         const proxyValue = (draft && draft.proxy !== undefined) ? draft.proxy : (status?.proxy ?? '');
+        const policyValue = (draft && draft.updatePolicy !== undefined) ? draft.updatePolicy : (status?.updatePolicy || 'off');
         const intervalValue = (draft && draft.intervalMin !== undefined)
           ? draft.intervalMin
           : String(status?.intervalMs ? Math.round(status.intervalMs / 60000) : 5);
@@ -333,6 +354,7 @@ window.__ModuleLoader__.load({
           if (branchTrim !== (status?.branch || 'main')) body.branch = branchTrim;
           const proxyTrim = proxyValue.trim();
           if (proxyTrim !== (status?.proxy ?? '')) body.proxy = proxyTrim === '' ? null : proxyTrim;
+          if (policyValue !== (status?.updatePolicy || 'off')) body.updatePolicy = policyValue;
           const minutes = Math.max(1, Number.parseInt(intervalValue, 10) || 5);
           const ms = minutes * 60000;
           if (ms !== (status?.intervalMs ?? 300000)) body.pullIntervalMs = ms;
@@ -356,7 +378,7 @@ window.__ModuleLoader__.load({
             await load();
             setBusy(false);
           }
-        }, [branchValue, intervalValue, load, proxyValue, repoValue, status, t]);
+        }, [branchValue, intervalValue, load, policyValue, proxyValue, repoValue, status, t]);
 
         const phase = status?.phase ?? 'disabled';
         const phaseLabel = t(PHASE_KEYS[phase] ?? 'phaseDisabled');
@@ -407,6 +429,38 @@ window.__ModuleLoader__.load({
               ? h('div', { style: { ...styles.hint, ...styles.logWarn } }, t('errorLabel') + ': ' + status.error)
               : null,
           ),
+
+          // Updates card: shown when the policy asks for checks, or when a check
+          // has already named something newer (so a `check` list survives reloads).
+          (status?.updatePolicy && status.updatePolicy !== 'off') || (status?.updates?.length ?? 0) > 0
+            ? h('div', { style: styles.card },
+                h('h3', { style: styles.cardTitle }, t('updatesTitle')),
+                (status?.updates?.length ?? 0) === 0
+                  ? h('p', { style: styles.hint }, t('updatesNone'))
+                  : null,
+                ...(status?.updates ?? []).map(update => h('div', { style: styles.row },
+                  h('span', { style: styles.value }, update.name),
+                  h('span', { style: styles.label }, `${update.from} → ${update.to}`),
+                )),
+                h('div', { style: styles.row },
+                  h('button', {
+                    type: 'button',
+                    style: styles.button,
+                    disabled: busy,
+                    onClick: () => void act(CHECK_URL, {}),
+                  }, t('checkUpdates')),
+                  (status?.updates?.length ?? 0) > 0
+                    ? h('button', {
+                        type: 'button',
+                        style: { ...styles.button, ...styles.buttonPrimary },
+                        disabled: busy,
+                        onClick: () => void act(UPDATE_URL, { names: (status.updates ?? []).map(update => update.name) }),
+                      }, t('updateAll'))
+                    : null,
+                ),
+                h('p', { style: styles.hint }, t('updatesHint')),
+              )
+            : null,
 
           // Blocking decisions: bootstrap choice / empty confirm.
           phase === 'await-choose'
@@ -480,6 +534,25 @@ window.__ModuleLoader__.load({
                   proxy: event.target.value,
                 })),
               }),
+            ),
+            h('div', { style: styles.row },
+              h('span', { style: styles.label }, t('policyLabel')),
+              h('select', {
+                style: styles.input,
+                value: policyValue,
+                onChange: (event) => setDraft(prev => ({
+                  repo: repoValue,
+                  branch: branchValue,
+                  intervalMin: intervalValue,
+                  proxy: proxyValue,
+                  ...(prev ?? {}),
+                  updatePolicy: event.target.value,
+                })),
+              },
+                h('option', { value: 'off' }, t('policyOff')),
+                h('option', { value: 'check' }, t('policyCheck')),
+                h('option', { value: 'auto' }, t('policyAuto')),
+              ),
             ),
             h('div', { style: styles.row },
               h('span', { style: styles.label }, t('branchLabel')),
