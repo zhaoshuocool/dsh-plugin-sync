@@ -151,7 +151,16 @@ export function createGitOps({ subprocess, dir, repo, branch, proxy = null, log 
 		await writeLocal(MANIFEST, text);
 		const added = await git(subprocess, ['add', MANIFEST], { cwd: dir });
 		if (added.code !== 0) throw new Error(`git add failed: ${added.stderr}`);
-		const committed = await git(subprocess, ['commit', '-q', '-m', message], { cwd: dir });
+		const committed = await git(subprocess, ['commit', '-q', '-m', message], {
+			cwd: dir,
+			env: {
+				...GIT_ENV,
+				GIT_AUTHOR_NAME: 'DSH Plugin Sync',
+				GIT_AUTHOR_EMAIL: 'dsh-plugin-sync@users.noreply.local',
+				GIT_COMMITTER_NAME: 'DSH Plugin Sync',
+				GIT_COMMITTER_EMAIL: 'dsh-plugin-sync@users.noreply.local',
+			},
+		});
 		if (committed.code !== 0) {
 			if (/nothing to commit/i.test(committed.stderr)) {
 				log('info', 'nothing to commit; remote already matches');
