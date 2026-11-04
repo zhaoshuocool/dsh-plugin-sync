@@ -96,3 +96,33 @@ test('planConfigPush never re-emits a secret key even if the manifest carried on
 	const remote = [{ name: 'ui', source: 'ui@1', enabled: true, config: { apiKey: 'sk_x' } }];
 	assert.deepEqual(planConfigPush(remote, { ui: { apiKey: 'sk_y' } }), []);
 });
+
+test('a value this machine changed is its own intent: remote does not overwrite it, it is pushed instead', () => {
+	const bundles = doc([{ name: 'ui', source: 'ui@1', enabled: true, config: { locale: 'zh' } }]).bundles;
+	const rows = [row('ui', { locale: 'en' }, { locale: 'en' })];
+	assert.deepEqual(planConfigApply(rows, bundles, { baselineBundles: bundles }), [], 'no apply over an intent');
+	assert.deepEqual(
+		planConfigPush(bundles, { ui: { locale: 'en' } }, { baselineBundles: bundles }),
+		[{ name: 'ui', config: { locale: 'en' } }],
+		'the intent travels to the manifest',
+	);
+});
+
+test('a key this machine never set follows a remote move', () => {
+	const remote = doc([{ name: 'ui', source: 'ui@1', enabled: true, config: { locale: 'zh' } }]).bundles;
+	const baseline = doc([{ name: 'ui', source: 'ui@1', enabled: true, config: { locale: 'en' } }]).bundles;
+	const plan = planConfigApply([row('ui', { locale: 'en' }, {})], remote, { baselineBundles: baseline });
+	assert.deepEqual(plan.map(p => p.values), [{ locale: 'zh' }]);
+});
+
+test('an explicit local value survives a whitelist that was just added elsewhere', () => {
+	const remote = doc([{ name: 'ui', source: 'ui@1', enabled: true, config: { locale: 'zh' } }]).bundles;
+	const baseline = doc([{ name: 'ui', source: 'ui@1', enabled: true }]).bundles;
+	const rows = [row('ui', { locale: 'en' }, { locale: 'en' })];
+	assert.deepEqual(planConfigApply(rows, remote, { baselineBundles: baseline }), []);
+	assert.deepEqual(
+		planConfigPush(remote, { ui: { locale: 'en' } }, { baselineBundles: baseline }),
+		[{ name: 'ui', config: { locale: 'en' } }],
+		'and the machine that set it tells the others',
+	);
+});

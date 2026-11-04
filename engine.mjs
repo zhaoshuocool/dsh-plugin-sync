@@ -270,7 +270,7 @@ export function createSyncEngine({
 	 * each edit is a Loader reconcile, so batching a plugin's keys keeps the
 	 * restart count at one per plugin instead of one per key.
 	 */
-	async function applyConfigs(remote, applied, errors) {
+	async function applyConfigs(remote, applied, errors, baselineBundles = []) {
 		if (!wantsConfig(remote)) return 0;
 		let rows;
 		try {
@@ -280,7 +280,7 @@ export function createSyncEngine({
 			return 0;
 		}
 		let count = 0;
-		for (const plan of planConfigApply(rows, remote.bundles, { selfName })) {
+		for (const plan of planConfigApply(rows, remote.bundles, { selfName, baselineBundles })) {
 			const ok = await pmCall(applied, errors, 'config', plan.name,
 				() => configEditor.edit(plan.entry, current => ({ ...(current ?? {}), ...plan.values })));
 			if (!ok) configBlocked.add(plan.name);
@@ -371,7 +371,7 @@ export function createSyncEngine({
 		}
 		// Config only after a clean convergence: a half-converged profile should
 		// not also get its plugins reconfigured underneath it.
-		const configCount = await applyConfigs(remote, applied, errors);
+		const configCount = await applyConfigs(remote, applied, errors, baseline?.bundles ?? []);
 		if (errors.length > 0) {
 			log('error', `config apply completed with ${errors.length} error(s)`);
 			return outcome('error', { applied, errors, remoteState: remote });
@@ -453,7 +453,8 @@ export function createSyncEngine({
 		// manifest, so this machine disagreeing about a whitelisted key has to
 		// reach the remote rather than sit in its own patch forever.
 		const configPlans = wantsConfig(remote)
-			? planConfigPush(remote.bundles, await localConfigOverrides()).filter(plan => !configBlocked.has(plan.name))
+			? planConfigPush(remote.bundles, await localConfigOverrides(), { baselineBundles: baseline?.bundles ?? [] })
+				.filter(plan => !configBlocked.has(plan.name))
 			: [];
 		if (diff.added.length + diff.removed.length + diff.changed.length === 0 && configPlans.length === 0) {
 			return outcome('nochange', { remoteState: remote });

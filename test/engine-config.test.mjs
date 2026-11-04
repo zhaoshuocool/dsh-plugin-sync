@@ -9,7 +9,7 @@ function row(name, source, enabled = true) {
 	return { name, source, enabled, availability: 'profile', installed: true, version: '1.0.0', removable: true };
 }
 
-function makeEngine({ rows, remoteText, configRows, configEditor, selfName = 'dsh-plugin-sync' }) {
+function makeEngine({ rows, remoteText, baselineText, configRows, configEditor, selfName = 'dsh-plugin-sync' }) {
 	const edits = [];
 	const pushed = [];
 	const git = {
@@ -18,7 +18,7 @@ function makeEngine({ rows, remoteText, configRows, configEditor, selfName = 'ds
 		async commitPush(text) { pushed.push(text); return 'pushed'; },
 		// A baseline equal to the remote text: the cycle is a converged steady
 		// state, which is the only path where config is applied or pushed.
-		async readLocal(rel) { return rel === 'baseline.json' ? (remoteText ?? null) : null; },
+		async readLocal(rel) { return rel === 'baseline.json' ? (baselineText ?? remoteText ?? null) : null; },
 		async writeLocal() {},
 	};
 	const pm = {
@@ -54,7 +54,9 @@ test('a whitelisted config whose value differs is written once, with a log line'
 	const { engine, edits, logs } = makeEngine({
 		rows: LOCAL,
 		remoteText: manifest([{ name: 'ui', source: 'ui@^1.0.0', enabled: true, config: { locale: 'zh', density: 'compact' } }]),
-		configRows: [{ entry: { options: { id: 'ui', name: 'ui' } }, inherited: { locale: 'en' }, override: { locale: 'en' } }],
+		// The whitelist arrived this cycle: nothing local disagrees with it.
+		baselineText: manifest([{ name: 'ui', source: 'ui@^1.0.0', enabled: true }]),
+		configRows: [{ entry: { options: { id: 'ui', name: 'ui' } }, inherited: { locale: 'en' }, override: {} }],
 	});
 	await engine.pull();
 	assert.deepEqual(edits, [{ id: 'ui', next: { locale: 'zh', density: 'compact' } }]);
@@ -132,10 +134,15 @@ test('a push that rebuilds an entry keeps that entry whitelist intact', async ()
 test('a plugin whose config write failed is not pushed back this cycle', async () => {
 	const { engine, pushed } = makeEngine({
 		rows: [row('ui', 'ui@^1.0.0')],
-		remoteText: manifest([{ name: 'ui', source: 'ui@^1.0.0', enabled: true, config: { locale: 'zh' } }]),
+		remoteText: manifest([{ name: 'ui', source: 'ui@^1.0.0', enabled: true, config: { locale: 'zh', density: 'compact' } }]),
 		configEditor: {
 			async configuration() {
-				return [{ entry: { options: { id: 'ui', name: 'ui' } }, inherited: { locale: 'en' }, override: { locale: 'en' } }];
+				return [{
+					entry: { options: { id: 'ui', name: 'ui' } },
+					inherited: { locale: 'en', density: 'roomy' },
+					// `locale` is this machine's own intent; `density` is the manifest's to set.
+					override: { locale: 'en' },
+				}];
 			},
 			// The host refuses: this entry is overridden by a home patch or a
 			// command-line overlay, so the profile cannot set it.
@@ -147,6 +154,19 @@ test('a plugin whose config write failed is not pushed back this cycle', async (
 	const pushedResult = await engine.push();
 	assert.equal(pushedResult.action, 'nochange', 'a plugin we could not configure must not rewrite the shared manifest');
 	assert.equal(pushed.length, 0, pushed.join(','));
+});
+
+test('a local config change is pushed, and the same pull does not revert it', async () => {
+	const { engine, edits, pushed } = makeEngine({
+		rows: [row('ui', 'ui@^1.0.0')],
+		remoteText: manifest([{ name: 'ui', source: 'ui@^1.0.0', enabled: true, config: { locale: 'zh' } }]),
+		configRows: [{ entry: { options: { id: 'ui', name: 'ui' } }, inherited: { locale: 'en' }, override: { locale: 'en' } }],
+	});
+	await engine.pull();
+	assert.deepEqual(edits, [], 'the pull leaves a local intent alone instead of overwriting it');
+	const result = await engine.push();
+	assert.equal(result.action, 'pushed');
+	assert.deepEqual(JSON.parse(pushed[0]).bundles.find(b => b.name === 'ui').config, { locale: 'en' });
 });
 
 test('without a configEditor the sync behaves exactly as before', async () => {	const { engine, pushed } = makeEngine({

@@ -290,11 +290,18 @@ function jsonEqual(a, b) {
  * whose value this machine does not already run. A plugin that is not installed
  * is skipped: config is not a way to install anything.
  *
+ * Three-way, exactly like the bundle list: a key whose local value differs from
+ * the last synced baseline is this machine's own intent, and a remote value
+ * never overwrites an intent — that key is pushed instead (see
+ * `planConfigPush`). Without that rule a pull would erase whatever the user
+ * changed in the Settings tab seconds before their push could carry it away.
+ *
  * The sync bundle's own entry sorts last, because editing our own config
  * restarts us and we do not want to die mid-list.
  */
 export function planConfigApply(rows, remoteBundles, opts = {}) {
 	const self = opts.selfName ?? null;
+	const baselineConfig = baselineConfigByName(opts.baselineBundles);
 	const byName = new Map();
 	for (const row of rows ?? []) {
 		const name = row?.entry?.options?.name;
@@ -308,6 +315,7 @@ export function planConfigApply(rows, remoteBundles, opts = {}) {
 		const values = {};
 		for (const [key, value] of Object.entries(entry.config)) {
 			if (unsafeConfigKey(key)) continue;
+			if (isLocalIntent(row.override, baselineConfig.get(entry.name), key)) continue;
 			if (jsonEqual(row.inherited?.[key], value)) continue;
 			values[key] = value;
 		}
@@ -318,13 +326,28 @@ export function planConfigApply(rows, remoteBundles, opts = {}) {
 	return plans;
 }
 
+function baselineConfigByName(baselineBundles) {
+	const byName = new Map();
+	for (const entry of baselineBundles ?? []) {
+		if (entry && typeof entry.name === 'string' && entry.config !== undefined) byName.set(entry.name, entry.config);
+	}
+	return byName;
+}
+
+/** Did this machine itself set this key to something other than the last synced value? */
+function isLocalIntent(override, baselineConfig, key) {
+	if (!override || typeof override !== 'object' || !Object.hasOwn(override, key)) return false;
+	return !jsonEqual(override[key], baselineConfig?.[key]);
+}
+
 /**
  * What this machine would add to the shared whitelist: only keys the manifest
- * already lists, and only where this machine's own profile patch says
- * something else. A key this machine never set is left alone — an absent local
- * value is not a vote to clear a shared one.
+ * already lists, and only where this machine has its own intent — a value it
+ * set that differs from the last synced manifest. A key this machine never set
+ * is left alone: an absent local value is not a vote to clear a shared one.
  */
 export function planConfigPush(remoteBundles, localOverrides, opts = {}) {
+	const baselineConfig = baselineConfigByName(opts.baselineBundles);
 	const plans = [];
 	for (const entry of remoteBundles ?? []) {
 		if (!entry || typeof entry.name !== 'string' || entry.config === undefined) continue;
@@ -333,7 +356,7 @@ export function planConfigPush(remoteBundles, localOverrides, opts = {}) {
 		const patch = {};
 		for (const key of Object.keys(entry.config)) {
 			if (unsafeConfigKey(key)) continue;
-			if (!Object.hasOwn(override, key)) continue;
+			if (!isLocalIntent(override, baselineConfig.get(entry.name), key)) continue;
 			if (jsonEqual(override[key], entry.config[key])) continue;
 			patch[key] = override[key];
 		}
