@@ -69,6 +69,37 @@ test('computeDiff sees no local change from an npm range drift', () => {
 	assert.deepEqual(computeDiff(baseline, local), { added: [], removed: [], changed: [] });
 });
 
+test('a deliberate major upgrade converges once and then settles', () => {
+	// machine A installed `pkg@^2.0.0` and pushed it; machine B still has 1.x.
+	const behind = [{ name: 'pkg', source: 'pkg@^1.2.26', enabled: true }];
+	const upgraded = { formatVersion: 1, bundles: [{ name: 'pkg', source: 'pkg@^2.0.0', enabled: true }] };
+	assert.deepEqual(planConvergence(behind, upgraded).reinstall, [{ name: 'pkg', source: 'pkg@^2.0.0' }]);
+	// After that reinstall the resolver records what it installed — same major as
+	// the manifest now says, so the next cycle must be quiet.
+	const settled = [{ name: 'pkg', source: 'pkg@^2.3.1', enabled: true }];
+	assert.deepEqual(planConvergence(settled, upgraded).reinstall, []);
+});
+
+test('an exact pin converges once and then settles against the recorded caret', () => {
+	const behind = [{ name: 'pkg', source: 'pkg@^1.2.26', enabled: true }];
+	const pinned = { formatVersion: 1, bundles: [{ name: 'pkg', source: 'pkg@2.3.1', enabled: true }] };
+	assert.deepEqual(planConvergence(behind, pinned).reinstall, [{ name: 'pkg', source: 'pkg@2.3.1' }]);
+	// pluginManager records a caret for what it installed, never the bare pin:
+	// comparing those two strings forever is the churn this rule must avoid.
+	const settled = [{ name: 'pkg', source: 'pkg@^2.3.1', enabled: true }];
+	assert.deepEqual(planConvergence(settled, pinned).reinstall, []);
+});
+
+test('a floating npm spec is compared by package name only', () => {
+	// `latest`, `next`, `*` and `>=…` can never equal the resolver's own recorded
+	// caret, so string comparison there means reinstalling on every cycle.
+	for (const range of ['latest', 'next', '*', '>=1.2.24', '1.x - 2', '']) {
+		const local = [{ name: 'pkg', source: 'pkg@^1.2.26', enabled: true }];
+		const remote = { formatVersion: 1, bundles: [{ name: 'pkg', source: `pkg@${range}`, enabled: true }] };
+		assert.deepEqual(planConvergence(local, remote).reinstall, [], `pkg@${range}`);
+	}
+});
+
 test('non-npm transports keep exact comparison', () => {
 	const local = [{ name: 'w', source: 'github:me/whale', enabled: true }];
 	const remote = { formatVersion: 1, bundles: [{ name: 'w', source: 'github:other/whale', enabled: true }] };

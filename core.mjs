@@ -91,38 +91,81 @@ export function bundlesFromList(bundles) {
 }
 
 /**
- * Parse a plain npm install spec into `{ name, major, exact }`; null for
- * anything else (github:, file:, link:, ssh:, a Windows path, …).
+ * Read the shape of an npm range: a pinned version, a range with a boundary
+ * version (`^1.2.3`, `~1.2`, `>=1.0`, `1.x`, `1.x - 2`), or a floating marker
+ * (`latest`, `next`, `*`) that names no version at all.
+ */
+function specShape(name, range) {
+	const exact = /^(\^|~)?v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(range);
+	if (exact) {
+		return {
+			name,
+			pin: exact[1] === undefined,
+			triple: [Number(exact[2]), Number(exact[3] ?? 0), Number(exact[4] ?? 0)],
+			floating: false,
+		};
+	}
+	const lead = /^(\^|~)?v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(range);
+	if (lead) {
+		return {
+			name,
+			pin: false,
+			triple: [Number(lead[2]), Number(lead[3] ?? 0), Number(lead[4] ?? 0)],
+			floating: false,
+		};
+	}
+	return { name, pin: false, triple: null, floating: true };
+}
+
+/**
+ * Parse a plain npm install spec into a spec shape; null for anything that is
+ * not one (github:, file:, link:, ssh:, a Windows path, an opaque id).
  */
 function npmSpec(source) {
 	if (typeof source !== 'string' || source === '') return null;
 	if (/^[A-Za-z][\w+.-]*:/.test(source)) return null;
 	const at = source.lastIndexOf('@');
-	const name = at > 0 ? source.slice(0, at) : null;
-	const range = at > 0 ? source.slice(at + 1) : source;
-	const match = /^(\^|~)?v?(\d+)/.exec(range);
-	if (!match) return null;
-	return { name, major: Number(match[2]), exact: !match[1] };
+	if (at > 0) return specShape(source.slice(0, at), source.slice(at + 1));
+	// No name part: only a version-shaped range (`^1.2.3`, `1.x`) is an npm
+	// source here. An arbitrary word is some other transport's identifier, and
+	// guessing it is "the same package" would be worse than comparing strings.
+	const bare = specShape(null, source);
+	return bare.floating ? null : bare;
 }
+
+const sameTriple = (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 
 /**
  * Do these two sources mean "install the same thing"?
  *
- * An npm spec is rewritten by the resolver: installing `mgr@^1.2.24` records
- * `mgr@^1.2.26` once that is the newest match, and the version already installed
- * satisfies both. Reading that rewrite as a source change makes every machine
- * remove and reinstall the bundle on every cycle, so an npm spec identifies
- * itself here by package name plus the major its range points at. Exact pins and
- * every other transport (github:, file:, link:, ssh:, paths) stay compared
- * exactly — those only move when someone means them to.
+ * An npm spec is rewritten by the resolver: installing `pkg@^1.2.24` records
+ * `pkg@^1.2.26`, and installing a bare pin `pkg@2.3.1` records `pkg@^2.3.1`.
+ * Comparing those strings as a source change makes every machine remove and
+ * reinstall the same bundle on every cycle. So the identity of an npm source is
+ * its package name plus the boundary the resolver cannot move it across:
+ *
+ * - ranges (`^1.2.24`, `~1.2.0`, `1.x`): the same major, because a caret or
+ *   tilde install never leaves its major and the resolver may move the recorded
+ *   patch/minor freely. A deliberate upgrade to a new major converges with one
+ *   reinstall and then settles.
+ * - a pin (`2.3.1`): equal only to what was recorded for that very version
+ *   (`^2.3.1`), so pinning a version still propagates — and stops propagating
+ *   once every machine has it.
+ * - floating specs (`latest`, `next`, `*`, `>=…`): the package name is the whole
+ *   identity, since such a range can never equal a recorded version.
+ *
+ * Every other transport (github:, file:, link:, ssh:, bare paths) stays compared
+ * exactly: those move only when someone means them to.
  */
 export function sourcesEquivalent(a, b) {
 	if (a === b) return true;
 	const one = npmSpec(a);
 	const other = npmSpec(b);
 	if (one === null || other === null) return false;
-	if (one.name !== other.name || one.exact || other.exact) return false;
-	return one.major === other.major;
+	if (one.name !== other.name) return false;
+	if (one.floating || other.floating) return true;
+	if (one.pin || other.pin) return sameTriple(one.triple, other.triple);
+	return one.triple[0] === other.triple[0];
 }
 
 function entryDiffers(a, b) {
