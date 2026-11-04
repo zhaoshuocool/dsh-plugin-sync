@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Mirror this profile's plugin bundle list to a private git repo and converge other machines onto it automatically.",
@@ -25,6 +25,7 @@
     "core.mjs",
     "engine.mjs",
     "git.mjs",
+    "registry.mjs",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
