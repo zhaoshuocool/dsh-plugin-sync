@@ -568,6 +568,10 @@ export function apply(ctx, config) {
 			now: () => new Date().toISOString(),
 			selfName: PACKAGE_NAME,
 			updatePolicy: conf.updatePolicy,
+			// The host's config editor is what the Settings tab already writes
+			// through; config syncing reuses that exact path (validate, persist,
+			// reconcile) rather than editing the patch file behind its back.
+			configEditor: ctx.configEditor ?? null,
 			// Only wired when the policy asks for it: with `off` the plugin never
 			// opens a registry connection, exactly as before this feature.
 			...(conf.updatePolicy === 'off' ? {} : { checkRegistry: names => latestVersions(names, { proxy: conf.proxy }) }),

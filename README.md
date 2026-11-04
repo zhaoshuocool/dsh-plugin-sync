@@ -82,6 +82,33 @@ YAML 片段是给习惯命令行的人的等价写法。
 - 走 `proxy` 配置：`http(s)` 代理用 CONNECT 建隧道后再 TLS，代理不可用时报错而不是
   偷偷直连。registry 地址固定 `https://registry.npmjs.org`。
 
+## 配置同步（清单白名单）
+
+清单条目可以多一个可选的 `config` 对象，它就是**同步白名单**本身——只有列进去的 key
+会被读、被写、被推回；没列的 key 各机器自己保管：
+
+```json
+{ "name": "dsh-client-auto-continue", "source": "dsh-client-auto-continue@…", "enabled": true,
+  "config": { "locale": "zh" } }
+```
+
+- **下发**：远端白名单里的 key，若本机生效值（bundle 层 + profile 合成）不同，就通过宿主
+  `configEditor` 写进 profile（与设置页保存同一条路径：校验 → 落盘 → Loader 热生效）。
+  每个插件一次 `edit`，不是每个 key 一次，避免重启风暴。插件未安装则跳过——配置不是安装手段。
+- **推回**：本机 profile 显式设过、且与清单不同的白名单 key，会推回清单。本机没设过的 key
+  **不会**被推（"我没写"不等于"该清掉"）。
+- **硬拒**：`apiKey` / `token` / `secret` / `password` / `authorization` / `private_key`
+  这类形状的 key，无论写在清单哪一层都会被拒，且整份清单直接判错（不是静默丢弃）；
+  `__jsExpr` 同样硬拒——profile patch 的 YAML 会把那个 key 变成可执行表达式。
+- **写不进去就不推**：某插件的 config 被宿主拒绝（该条目由 home patch 或命令行 overlay
+  拥有），本轮不会把本机值推平到清单，避免静默改写别人的机器。
+- 清单里没有 `config` 时，插件**完全不读**宿主配置，行为与本功能之前一致。
+- 自己（`dsh-plugin-sync`）的 config 排最后写：改自己的配置会重启自己。
+- `insert:` 进来的条目（MCP 客户端一类）不在 `configEditor` 的可编辑范围里，宿主本身就跳过
+  `insert`；这类插件的配置不在同步范围内。
+- 老版本插件读得懂带 `config` 的清单（未知字段会被忽略），但它**推送时会抹掉**这个字段
+  （它只写 name/source/enabled）。两边都升级到这个版本之前，别让老机器推送。
+
 ## 实现要点
 
 - 零运行时 npm 依赖；git 走系统 `git` CLI（`subprocess` 注入服务）。
@@ -155,3 +182,8 @@ YAML 片段是给习惯命令行的人的等价写法。
    `planUpdates` 只判断该不该升（精确 pin 不动，range 挑不中的版本不升）；`engine.mjs` 按策略
    与 24 小时缓存执行，升级复用已有的 remove+install 原语，并记账避免重复装卸；设置页多一个
    策略下拉与「可升级」列表。测试 104 → 134 条，全绿。
+8. **新增：配置同步（2026-11-04）**：见上文「配置同步（清单白名单）」。宿主
+   `dsh-config-editor` 的 `configuration()` 给出 `inherited`（生效值）与 `override`
+   （profile 显式值），下发比前者、推回取后者；密钥形状的 key 与 `__jsExpr` 硬拒；
+   写被拒的插件不推回。测试 134 → 154 条，全绿（新测试先在改动前的装机代码上跑过：
+   6 条失败）。

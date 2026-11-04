@@ -22,7 +22,8 @@ function normalizeEntry(entry) {
 	if (source === undefined) return undefined;
 	const enabled = entry.enabled == null ? null : (typeof entry.enabled === 'boolean' ? entry.enabled : undefined);
 	if (enabled === undefined) return undefined;
-	return { name: entry.name, source, enabled };
+	const config = entryConfig(entry);
+	return config === undefined ? { name: entry.name, source, enabled } : { name: entry.name, source, enabled, config };
 }
 
 /**
@@ -47,6 +48,13 @@ export function normalizeManifest(raw) {
 	}
 	const bundles = [];
 	for (const entry of raw.bundles) {
+		const configError = entryConfigError(entry);
+		if (configError !== null) {
+			// Loud on purpose: a manifest that names a secret key is refused in
+			// full rather than quietly dropping the key and syncing the rest.
+			const who = typeof entry?.name === 'string' ? entry.name : 'unknown';
+			return { ok: false, error: `bundle "${who}": ${configError}` };
+		}
 		const normalized = normalizeEntry(entry);
 		if (!normalized) {
 			return { ok: false, error: `invalid bundle entry: ${JSON.stringify(entry)}` };
@@ -187,7 +195,177 @@ export function computeDiff(baseline, local) {
 }
 
 /**
- * Apply an intent diff to a manifest; returns a new manifest with bumped
+ * A manifest entry may carry `config`: the exact keys this manifest is
+ * allowed to sync for that plugin. Nothing else about a plugin's configuration
+ * is ever read, written, or pushed.
+ *
+ * Secret-shaped keys are refused on both sides — the machine writing the
+ * manifest cannot publish them, and the machine reading it cannot install them
+ * into a profile patch. `__jsExpr` is refused because the profile patch YAML
+ * turns that key into a live expression.
+ */
+const SECRET_CONFIG_KEY = /(?:^|[_$-])(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret|password|passwd|authorization|credential|private[_-]?key|client[_-]?secret)(?:[$_-]|$)/i;
+const MAX_CONFIG_DEPTH = 6;
+
+export function unsafeConfigKey(key) {
+	const name = String(key);
+	return name === '__jsExpr' || SECRET_CONFIG_KEY.test(name);
+}
+
+function isJsonScalar(value) {
+	const kind = typeof value;
+	if (kind === 'string' || kind === 'boolean') return true;
+	if (kind === 'number') return Number.isFinite(value);
+	return value === null;
+}
+
+function configValueIssues(value, path, depth, issues) {
+	if (isJsonScalar(value)) return;
+	if (Array.isArray(value)) {
+		if (depth >= MAX_CONFIG_DEPTH) {
+			issues.push(`config at "${path || '.'}" nests too deeply`);
+			return;
+		}
+		value.forEach((item, index) => configValueIssues(item, `${path}[${index}]`, depth + 1, issues));
+		return;
+	}
+	if (typeof value !== 'object' || value === null) {
+		issues.push(`config at "${path}" is not a JSON value`);
+		return;
+	}
+	if (depth >= MAX_CONFIG_DEPTH) {
+		issues.push(`config at "${path || '.'}" nests too deeply`);
+		return;
+	}
+	for (const [key, item] of Object.entries(value)) {
+		if (unsafeConfigKey(key)) {
+			issues.push(`config key "${key}" looks like a secret or an expression; it is never synced`);
+			continue;
+		}
+		configValueIssues(item, `${path}.${key}`, depth + 1, issues);
+	}
+}
+
+/** @returns string[] why this config object is unusable (empty when it is fine). */
+export function configIssues(config) {
+	if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+		return ['config must be a plain object of key/value pairs'];
+	}
+	const issues = [];
+	for (const [key, value] of Object.entries(config)) {
+		if (unsafeConfigKey(key)) {
+			issues.push(`config key "${key}" looks like a secret or an expression; it is never synced`);
+			continue;
+		}
+		configValueIssues(value, key, 1, issues);
+	}
+	return issues;
+}
+
+function rawEntryConfig(entry) {
+	return typeof entry === 'object' && entry !== null && 'config' in entry ? entry.config : undefined;
+}
+
+/** @returns string|null the first problem with an entry's config, naming keys but never values. */
+export function entryConfigError(entry) {
+	const config = rawEntryConfig(entry);
+	if (config === undefined) return null;
+	const issues = configIssues(config);
+	return issues.length > 0 ? issues[0] : null;
+}
+
+function entryConfig(entry) {
+	const config = rawEntryConfig(entry);
+	if (config === undefined) return undefined;
+	const copy = JSON.parse(JSON.stringify(config));
+	return Object.keys(copy).length === 0 ? undefined : copy;
+}
+
+function jsonEqual(a, b) {
+	return JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
+}
+
+/**
+ * Which plugins need a config write to match the manifest, and only the keys
+ * whose value this machine does not already run. A plugin that is not installed
+ * is skipped: config is not a way to install anything.
+ *
+ * The sync bundle's own entry sorts last, because editing our own config
+ * restarts us and we do not want to die mid-list.
+ */
+export function planConfigApply(rows, remoteBundles, opts = {}) {
+	const self = opts.selfName ?? null;
+	const byName = new Map();
+	for (const row of rows ?? []) {
+		const name = row?.entry?.options?.name;
+		if (typeof name === 'string') byName.set(name, row);
+	}
+	const plans = [];
+	for (const entry of remoteBundles ?? []) {
+		if (!entry || typeof entry.name !== 'string' || entry.config === undefined) continue;
+		const row = byName.get(entry.name);
+		if (!row) continue;
+		const values = {};
+		for (const [key, value] of Object.entries(entry.config)) {
+			if (unsafeConfigKey(key)) continue;
+			if (jsonEqual(row.inherited?.[key], value)) continue;
+			values[key] = value;
+		}
+		if (Object.keys(values).length === 0) continue;
+		plans.push({ name: entry.name, entry: row.entry, values });
+	}
+	plans.sort((one, other) => (one.name === self ? 1 : 0) - (other.name === self ? 1 : 0));
+	return plans;
+}
+
+/**
+ * What this machine would add to the shared whitelist: only keys the manifest
+ * already lists, and only where this machine's own profile patch says
+ * something else. A key this machine never set is left alone — an absent local
+ * value is not a vote to clear a shared one.
+ */
+export function planConfigPush(remoteBundles, localOverrides, opts = {}) {
+	const plans = [];
+	for (const entry of remoteBundles ?? []) {
+		if (!entry || typeof entry.name !== 'string' || entry.config === undefined) continue;
+		const override = localOverrides?.[entry.name];
+		if (!override || typeof override !== 'object') continue;
+		const patch = {};
+		for (const key of Object.keys(entry.config)) {
+			if (unsafeConfigKey(key)) continue;
+			if (!Object.hasOwn(override, key)) continue;
+			if (jsonEqual(override[key], entry.config[key])) continue;
+			patch[key] = override[key];
+		}
+		if (Object.keys(patch).length > 0) plans.push({ name: entry.name, config: patch });
+	}
+	return plans;
+}
+
+/**
+ * Fold a push plan into a manifest that was just rebuilt from local state.
+ * Rebuilt entries carry no config, so the whitelist is carried over from the
+ * remote manifest first and the new values written on top — otherwise changing
+ * one plugin's enabled flag would silently drop its synced keys.
+ */
+export function mergeManifestConfig(manifest, remoteBundles, pushPlan) {
+	const patches = new Map((pushPlan ?? []).map(plan => [plan.name, plan.config]));
+	const carried = new Map((remoteBundles ?? []).map(entry => [entry.name, entry.config]).filter(([, config]) => config !== undefined));
+	const bundles = manifest.bundles.map(entry => {
+		const base = carried.get(entry.name);
+		const patch = patches.get(entry.name);
+		const next = { ...entry };
+		delete next.config;
+		if (base !== undefined || patch !== undefined) {
+			const merged = { ...(base ?? {}), ...(patch ?? {}) };
+			if (Object.keys(merged).length > 0) next.config = merged;
+		}
+		return next;
+	});
+	return { ...manifest, bundles };
+}
+
+/**
  * updatedAt/updatedBy. Input is never mutated.
  */
 export function applyDiff(manifest, diff, machineName, now) {

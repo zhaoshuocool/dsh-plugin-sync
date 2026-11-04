@@ -17,6 +17,9 @@ import {
 	installedVersionsFromList,
 	planUpdates,
 	isNpmSource,
+	planConfigApply,
+	planConfigPush,
+	mergeManifestConfig,
 } from './core.mjs';
 
 const BASELINE = 'baseline.json';
@@ -57,6 +60,7 @@ export function createSyncEngine({
 	selfName = null,
 	updatePolicy = 'off',
 	checkRegistry = null,
+	configEditor = null,
 }) {
 	let emptyConfirmed = false;
 
@@ -229,6 +233,65 @@ export function createSyncEngine({
 		}
 	}
 
+	// --- config whitelisting -------------------------------------------------
+
+	// Plugins whose config write the host refused (a home patch or command-line
+	// overlay owns that entry). Their local value must never be pushed: pushing
+	// would overwrite the shared whitelist with a value this machine cannot set.
+	const configBlocked = new Set();
+
+	function wantsConfig(remote) {
+		return configEditor !== null
+			&& typeof configEditor.configuration === 'function'
+			&& typeof configEditor.edit === 'function'
+			&& (remote?.bundles ?? []).some(entry => entry.config !== undefined);
+	}
+
+	/** The values this machine's own profile patch explicitly sets, by plugin name. */
+	async function localConfigOverrides() {
+		if (configEditor === null || typeof configEditor.configuration !== 'function') return {};
+		let rows;
+		try {
+			rows = await configEditor.configuration();
+		} catch (error) {
+			log('warn', `configuration read failed: ${error?.message ?? error}`);
+			return {};
+		}
+		const overrides = {};
+		for (const row of rows ?? []) {
+			const name = row?.entry?.options?.name;
+			if (typeof name === 'string' && row.override && typeof row.override === 'object') overrides[name] = row.override;
+		}
+		return overrides;
+	}
+
+	/**
+	 * Write the whitelisted values the manifest carries. One `edit` per plugin:
+	 * each edit is a Loader reconcile, so batching a plugin's keys keeps the
+	 * restart count at one per plugin instead of one per key.
+	 */
+	async function applyConfigs(remote, applied, errors) {
+		if (!wantsConfig(remote)) return 0;
+		let rows;
+		try {
+			rows = await configEditor.configuration();
+		} catch (error) {
+			log('warn', `configuration read failed: ${error?.message ?? error}`);
+			return 0;
+		}
+		let count = 0;
+		for (const plan of planConfigApply(rows, remote.bundles, { selfName })) {
+			const ok = await pmCall(applied, errors, 'config', plan.name,
+				() => configEditor.edit(plan.entry, current => ({ ...(current ?? {}), ...plan.values })));
+			if (!ok) configBlocked.add(plan.name);
+			else configBlocked.delete(plan.name);
+			if (!ok) continue;
+			count += 1;
+			log('info', `config: ${plan.name} ${Object.keys(plan.values).join(', ')} set to the manifest value`);
+		}
+		return count;
+	}
+
 	function commitMessage(kind, summary) {
 		return `sync(${kind}): ${machineName} ${summary} @ ${now()}`;
 	}
@@ -306,7 +369,14 @@ export function createSyncEngine({
 			log('error', `convergence completed with ${errors.length} error(s)`);
 			return outcome('error', { applied, errors, remoteState: remote });
 		}
-		return outcome(didSomething ? 'converged' : 'nochange', { applied, remoteState: remote });
+		// Config only after a clean convergence: a half-converged profile should
+		// not also get its plugins reconfigured underneath it.
+		const configCount = await applyConfigs(remote, applied, errors);
+		if (errors.length > 0) {
+			log('error', `config apply completed with ${errors.length} error(s)`);
+			return outcome('error', { applied, errors, remoteState: remote });
+		}
+		return outcome(didSomething || configCount > 0 ? 'converged' : 'nochange', { applied, remoteState: remote });
 	}
 
 	/**
@@ -379,12 +449,19 @@ export function createSyncEngine({
 		const { manifest: baseline } = await readBaselineManifest();
 		const local = await localEntries();
 		const diff = computeDiff(baseline?.bundles ?? [], local);
-		if (diff.added.length + diff.removed.length + diff.changed.length === 0) {
+		// A config-only change is still a change: the whitelist lives in the
+		// manifest, so this machine disagreeing about a whitelisted key has to
+		// reach the remote rather than sit in its own patch forever.
+		const configPlans = wantsConfig(remote)
+			? planConfigPush(remote.bundles, await localConfigOverrides()).filter(plan => !configBlocked.has(plan.name))
+			: [];
+		if (diff.added.length + diff.removed.length + diff.changed.length === 0 && configPlans.length === 0) {
 			return outcome('nochange', { remoteState: remote });
 		}
 
-		const intent = render(applyDiff(remote, diff, machineName, now()));
-		const summary = `+${diff.added.length} ~${diff.changed.length} -${diff.removed.length}`;
+		const intent = render(mergeManifestConfig(applyDiff(remote, diff, machineName, now()), remote.bundles, configPlans));
+		const summary = `+${diff.added.length} ~${diff.changed.length} -${diff.removed.length}`
+			+ (configPlans.length > 0 ? ` cfg${configPlans.length}` : '');
 		const message = commitMessage('push', summary);
 		let result = await git.commitPush(intent, message);
 		let latest = remote;
@@ -410,7 +487,8 @@ export function createSyncEngine({
 		}
 		await rememberState(parseManifestJson(committed).manifest ?? latest);
 		return outcome('pushed', {
-			applied: [...diff.added.map(e => e.name), ...diff.changed.map(e => e.name), ...diff.removed],
+			applied: [...diff.added.map(e => e.name), ...diff.changed.map(e => e.name), ...diff.removed,
+				...configPlans.map(e => e.name)],
 			remoteState: latest,
 		});
 	}
