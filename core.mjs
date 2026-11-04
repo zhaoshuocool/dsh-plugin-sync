@@ -313,10 +313,16 @@ export function planConfigApply(rows, remoteBundles, opts = {}) {
 		const row = byName.get(entry.name);
 		if (!row) continue;
 		const values = {};
+		const effective = { ...(row.inherited ?? {}), ...(row.override ?? {}) };
 		for (const [key, value] of Object.entries(entry.config)) {
 			if (unsafeConfigKey(key)) continue;
 			if (isLocalIntent(row.override, baselineConfig.get(entry.name), key)) continue;
-			if (jsonEqual(row.inherited?.[key], value)) continue;
+			// The host's `inherited` deliberately excludes this profile's own
+			// config, so the value the plugin actually runs is the layers plus
+			// the profile override. Comparing against `inherited` alone would
+			// rewrite an identical value every cycle — an edit is a Loader
+			// restart, so that is a churn bug, not a cosmetic one.
+			if (jsonEqual(effective[key], value)) continue;
 			values[key] = value;
 		}
 		if (Object.keys(values).length === 0) continue;

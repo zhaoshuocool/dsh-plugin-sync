@@ -108,6 +108,16 @@ test('a value this machine changed is its own intent: remote does not overwrite 
 	);
 });
 
+test('a profile that already sets the same value is left alone, not rewritten every cycle', () => {
+	const remote = doc([{ name: 'ui', source: 'ui@1', enabled: true, config: { locale: 'zh' } }]).bundles;
+	const baseline = doc([{ name: 'ui', source: 'ui@1', enabled: true, config: { locale: 'zh' } }]).bundles;
+	// The host reports the inherited bundle-layer value (no locale here) and the
+	// profile's own override separately; what the plugin runs is the two merged.
+	const rows = [{ entry: { options: { id: 'ui', name: 'ui' } }, inherited: {}, override: { locale: 'zh' } }];
+	assert.deepEqual(planConfigApply(rows, remote, { baselineBundles: baseline }), []);
+	assert.deepEqual(planConfigApply([{ entry: { options: { id: 'ui', name: 'ui' } }, inherited: {}, override: {} }], remote, { baselineBundles: baseline }).map(p => p.values), [{ locale: 'zh' }]);
+});
+
 test('a key this machine never set follows a remote move', () => {
 	const remote = doc([{ name: 'ui', source: 'ui@1', enabled: true, config: { locale: 'zh' } }]).bundles;
 	const baseline = doc([{ name: 'ui', source: 'ui@1', enabled: true, config: { locale: 'en' } }]).bundles;
