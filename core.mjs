@@ -624,6 +624,9 @@ export function setStatus(patch) {
 	if ('proxy' in patch) status.proxy = patch.proxy ?? null;
 	if ('machineName' in patch) status.machineName = patch.machineName ?? null;
 	if ('intervalMs' in patch) status.intervalMs = patch.intervalMs ?? null;
+	if ('updatePolicy' in patch) status.updatePolicy = patch.updatePolicy ?? null;
+	if ('updates' in patch) status.updates = patch.updates ?? null;
+	if ('lastUpdateCheckAt' in patch) status.lastUpdateCheckAt = patch.lastUpdateCheckAt ?? null;
 	if ('remoteState' in patch) status.remoteState = patch.remoteState ?? null;
 	if ('lastPullAt' in patch) status.lastPullAt = patch.lastPullAt ?? null;
 	if ('lastPushAt' in patch) status.lastPushAt = patch.lastPushAt ?? null;

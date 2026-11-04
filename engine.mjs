@@ -474,7 +474,11 @@ export function createSyncEngine({
 				return outcome('error', { errors: ['push rejected and remote could not be re-read'], remoteState: remote });
 			}
 			latest = refetch.manifest;
-			const replayed = render(applyDiff(latest, diff, machineName, now()));
+			const replayConfigPlans = planConfigPush(latest.bundles,
+				Object.fromEntries(configPlans.map(plan => [plan.name, plan.config])),
+				{ baselineBundles: baseline?.bundles ?? [] });
+			const replayed = render(mergeManifestConfig(
+				applyDiff(latest, diff, machineName, now()), latest.bundles, replayConfigPlans));
 			committed = replayed;
 			result = await git.commitPush(replayed, commitMessage('push', `${summary} (replayed)`));
 			if (result === 'pushed') {
