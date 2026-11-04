@@ -99,7 +99,7 @@ function parseConfig(data) {
 	}
 
 	let machineName = os.hostname() || 'unknown-machine';
-	if (source.machineName !== undefined) {
+	if (source.machineName !== undefined && source.machineName !== null) {
 		if (typeof source.machineName !== 'string' || source.machineName.trim() === '' || source.machineName.length > 128) {
 			issues.push({ path: ['machineName'], message: 'machineName must be a non-empty string (at most 128 characters)' });
 		} else machineName = source.machineName;

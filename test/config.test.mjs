@@ -24,6 +24,10 @@ test('Config accepts each update policy and defaults to off', () => {
 	}
 });
 
+test('Config clears a machineName back to the hostname default', () => {
+	assert.equal(Config({ machineName: null }).machineName, os.hostname());
+});
+
 test('Config rejects an unknown update policy', () => {
 	for (const policy of ['yes', 'ON', '', 1]) {
 		assert.throws(
