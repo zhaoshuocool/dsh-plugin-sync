@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-sync",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "description": "Mirror this profile's plugin bundle list to a private git repo and converge other machines onto it automatically.",

@@ -70,8 +70,8 @@ window.__ModuleLoader__.load({
         noChange: 'Nothing changed to save.',
         runNow: 'Sync now',
         runStarted: 'Sync started',
-        chooseTitle: 'No baseline on the remote yet',
-        chooseHint: 'Choose how this machine should start syncing:',
+        chooseTitle: 'Sync mode',
+        chooseHint: 'Use remote adjusts local plugins and removes those absent from the remote list. Merge keeps plugins from both lists and uploads the combined list.',
         bootstrapRemote: 'Use the remote list',
         bootstrapMerge: 'Merge both lists',
         emptyTitle: 'The remote list is empty',
@@ -129,8 +129,8 @@ window.__ModuleLoader__.load({
         noChange: '没有需要保存的改动。',
         runNow: '立即同步',
         runStarted: '已触发同步',
-        chooseTitle: '远端还没有基线',
-        chooseHint: '选择这台电脑开始同步的方式：',
+        chooseTitle: '同步模式',
+        chooseHint: '以远端为准会调整本机插件，移除远端清单以外的插件；合并会保留两边的插件并上传合并清单。',
         bootstrapRemote: '以远端为准',
         bootstrapMerge: '先合并（两边取并集）',
         emptyTitle: '远端清单为空',
@@ -463,7 +463,7 @@ window.__ModuleLoader__.load({
             : null,
 
           // Blocking decisions: bootstrap choice / empty confirm.
-          phase === 'await-choose'
+          phase === 'await-choose' || phase === 'error'
             ? h('div', { style: styles.card },
                 h('h3', { style: styles.cardTitle }, t('chooseTitle')),
                 h('p', { style: styles.hint }, t('chooseHint')),

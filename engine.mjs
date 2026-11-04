@@ -448,7 +448,14 @@ export function createSyncEngine({
 
 		const { manifest: baseline } = await readBaselineManifest();
 		const local = await localEntries();
-		const diff = computeDiff(baseline?.bundles ?? [], local);
+		if (!baseline) {
+			// A watcher or manual push cannot decide bootstrap policy for the user.
+			if (!sameBundles(local, remote.bundles)) return outcome('await-choose', { remoteState: remote });
+			await git.writeLocal(BASELINE, text);
+			await rememberState(remote);
+			return outcome('nochange', { remoteState: remote });
+		}
+		const diff = computeDiff(baseline.bundles, local);
 		// A config-only change is still a change: the whitelist lives in the
 		// manifest, so this machine disagreeing about a whitelisted key has to
 		// reach the remote rather than sit in its own patch forever.

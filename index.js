@@ -187,7 +187,8 @@ export function createScheduler({ pull, push, intervalMs, debounceMs = 30_000, b
 			// replay, and the scheduler must never wedge on a rejection.
 			if (doPull) {
 				try {
-					await pull();
+					const result = await pull();
+					if (['await-choose', 'await-empty-confirm', 'error'].includes(result?.action)) return;
 				} catch { /* the injected wrapper reports and logs */ }
 			}
 			if (doPush) {
