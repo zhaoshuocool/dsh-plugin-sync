@@ -90,8 +90,43 @@ export function bundlesFromList(bundles) {
 	return entries;
 }
 
+/**
+ * Parse a plain npm install spec into `{ name, major, exact }`; null for
+ * anything else (github:, file:, link:, ssh:, a Windows path, …).
+ */
+function npmSpec(source) {
+	if (typeof source !== 'string' || source === '') return null;
+	if (/^[A-Za-z][\w+.-]*:/.test(source)) return null;
+	const at = source.lastIndexOf('@');
+	const name = at > 0 ? source.slice(0, at) : null;
+	const range = at > 0 ? source.slice(at + 1) : source;
+	const match = /^(\^|~)?v?(\d+)/.exec(range);
+	if (!match) return null;
+	return { name, major: Number(match[2]), exact: !match[1] };
+}
+
+/**
+ * Do these two sources mean "install the same thing"?
+ *
+ * An npm spec is rewritten by the resolver: installing `mgr@^1.2.24` records
+ * `mgr@^1.2.26` once that is the newest match, and the version already installed
+ * satisfies both. Reading that rewrite as a source change makes every machine
+ * remove and reinstall the bundle on every cycle, so an npm spec identifies
+ * itself here by package name plus the major its range points at. Exact pins and
+ * every other transport (github:, file:, link:, ssh:, paths) stay compared
+ * exactly — those only move when someone means them to.
+ */
+export function sourcesEquivalent(a, b) {
+	if (a === b) return true;
+	const one = npmSpec(a);
+	const other = npmSpec(b);
+	if (one === null || other === null) return false;
+	if (one.name !== other.name || one.exact || other.exact) return false;
+	return one.major === other.major;
+}
+
 function entryDiffers(a, b) {
-	return a.source !== b.source || a.enabled !== b.enabled;
+	return !sourcesEquivalent(a.source, b.source) || a.enabled !== b.enabled;
 }
 
 /**
@@ -182,7 +217,7 @@ export function planConvergence(local, remote, opts = {}) {
 			if (entry.source != null && entry.name !== self) install.push({ name: entry.name, source: entry.source });
 			continue;
 		}
-		if (entry.source != null && entry.source !== mine.source && entry.name !== self) {
+		if (entry.source != null && !sourcesEquivalent(entry.source, mine.source) && entry.name !== self) {
 			reinstall.push({ name: entry.name, source: entry.source });
 		}
 		if (entry.enabled === true && mine.enabled !== true) enable.push(entry.name);

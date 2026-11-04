@@ -105,3 +105,13 @@ YAML 片段是给习惯命令行的人的等价写法。
    `bootstrap {"mode":"remote"}` 收敛：装 4 个、移除 1 个、`errors: []`，
    `baseline.json` / `state.json` 落盘，状态回到 `idle`。
    顺带确认：pnpm 安装可直达 GitHub，只有 git 这条路需要代理。
+5. **npm 区间漂移抖动**：远端写 `mgr@^1.2.24`，本机装完后 pnpm 把 source 规范化成
+   `mgr@^1.2.26`（已装版本同时满足两个区间）。按字符串比较 source 就永远不一致 →
+   每轮同步 remove+install 一次（实测 09:02:15 与 09:07:15 两轮，间隔正好一个 pull 周期）。
+   现在 npm spec 的身份 = 包名 + 区间指向的 major：同 major 的区间改写不算漂移，
+   精确 pin 与 `github:` / `file:` / `link:` / `ssh:` 仍按原样比较，
+   所以「一台机器升级后把新版传播到其它机器」这条路径照旧有效。
+6. **`HMR transactions cannot be nested`**（观察）：宿主 `dsh-hmr` 用 AsyncLocalStorage
+   记账，事务执行中再发起 pluginManager 变更会被拒。00:05 / 00:10 两轮的 remove 撞的就是
+   这条，宿主重启后同一个 remove 在 09:02 正常完成——是执行上下文问题，不是清单损坏，
+   插件侧也没有可靠绕法；第 5 条修掉每轮重装后就不再触发它。

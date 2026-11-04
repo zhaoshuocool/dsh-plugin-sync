@@ -88,6 +88,32 @@ test('bootstrap remote never removes or reinstalls the sync bundle itself on sou
 	assert.ok(git.state.baselines['baseline.json'], 'a clean convergence still records the baseline');
 });
 
+test('pull takes no action when only an npm range was rewritten by the resolver', async () => {
+	// the live loop: the manifest pins `mgr@^1.2.24`, the resolver recorded
+	// `mgr@^1.2.26` here — the same installed version satisfies both, yet every
+	// cycle planned a remove+install of that bundle.
+	const remote = manifestOf([{ name: 'mgr', source: 'mgr@^1.2.24', enabled: true }]);
+	const { engine, pm, git } = makeEngine({
+		rows: [row('mgr', 'mgr@^1.2.26', true)],
+		remote,
+		baseline: manifestOf([{ name: 'mgr', source: 'mgr@^1.2.24', enabled: true }]),
+	});
+	const outcome = await engine.pull();
+	assert.deepEqual(pm.calls, [], 'no remove+install churn from a range rewrite');
+	assert.deepEqual(git.state.commits, [], 'and no push rewriting the range back');
+	assert.deepEqual(outcome.errors, []);
+});
+
+test('bootstrap answers nochange when only an npm range was rewritten', async () => {
+	// otherwise the Settings tab asks "以远端为准 / 先合并" over a difference
+	// that is only the resolver's own rewrite.
+	const remote = manifestOf([{ name: 'mgr', source: 'mgr@^1.2.24', enabled: true }]);
+	const { engine, pm } = makeEngine({ rows: [row('mgr', 'mgr@^1.2.26', true)], remote });
+	const outcome = await engine.bootstrap('remote');
+	assert.equal(outcome.action, 'nochange');
+	assert.deepEqual(pm.calls, []);
+});
+
 test('pull installs a bundle that only exists on the remote', async () => {
 	const remote = manifestOf([
 		row('one', 's1', true),

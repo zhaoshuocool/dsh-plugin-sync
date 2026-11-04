@@ -13,6 +13,7 @@ import {
 	mergeUnion,
 	planConvergence,
 	isShrinkingToEmpty,
+	sourcesEquivalent,
 } from './core.mjs';
 
 const BASELINE = 'baseline.json';
@@ -27,7 +28,7 @@ function sameBundles(a, b) {
 	const byName = new Map(a.map(e => [e.name, e]));
 	for (const entry of b) {
 		const mine = byName.get(entry.name);
-		if (!mine || mine.source !== entry.source || mine.enabled !== entry.enabled) return false;
+		if (!mine || !sourcesEquivalent(mine.source, entry.source) || mine.enabled !== entry.enabled) return false;
 	}
 	return true;
 }

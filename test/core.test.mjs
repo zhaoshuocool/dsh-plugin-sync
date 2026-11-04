@@ -30,6 +30,54 @@ const validManifest = () => ({
 	updatedBy: 'machine-a',
 });
 
+// --- npm spec drift ----------------------------------------------------------
+// An npm `source` is a spec, and the resolver rewrites it: installing
+// `mgr@^1.2.24` records `mgr@^1.2.26` once that is the newest match. Both accept
+// the installed version, so string equality there is not a source change — it
+// makes every machine remove and reinstall the same bundle on every cycle.
+
+test('planConvergence does not reinstall on an npm range drift within a major', () => {
+	const local = [{ name: 'mgr', source: 'mgr@^1.2.26', enabled: true }];
+	const remote = { formatVersion: 1, bundles: [{ name: 'mgr', source: 'mgr@^1.2.24', enabled: true }] };
+	assert.deepEqual(
+		planConvergence(local, remote),
+		{ install: [], remove: [], enable: [], disable: [], reinstall: [] },
+	);
+});
+
+test('planConvergence reinstalls across an npm major range change', () => {
+	const local = [{ name: 'mgr', source: 'mgr@^1.2.26', enabled: true }];
+	const remote = { formatVersion: 1, bundles: [{ name: 'mgr', source: 'mgr@^2.0.0', enabled: true }] };
+	assert.deepEqual(planConvergence(local, remote).reinstall, [{ name: 'mgr', source: 'mgr@^2.0.0' }]);
+});
+
+test('planConvergence treats an exact npm pin as exact', () => {
+	const local = [{ name: 'mgr', source: 'mgr@1.2.26', enabled: true }];
+	const remote = { formatVersion: 1, bundles: [{ name: 'mgr', source: 'mgr@1.2.24', enabled: true }] };
+	assert.deepEqual(planConvergence(local, remote).reinstall, [{ name: 'mgr', source: 'mgr@1.2.24' }]);
+});
+
+test('a scoped npm range drift is drift-free too', () => {
+	const local = [{ name: '@scope/mgr', source: '@scope/mgr@^1.2.26', enabled: true }];
+	const remote = { formatVersion: 1, bundles: [{ name: '@scope/mgr', source: '@scope/mgr@^1.2.24', enabled: true }] };
+	assert.deepEqual(planConvergence(local, remote).reinstall, []);
+});
+
+test('computeDiff sees no local change from an npm range drift', () => {
+	const baseline = [{ name: 'mgr', source: 'mgr@^1.2.24', enabled: true }];
+	const local = [{ name: 'mgr', source: 'mgr@^1.2.26', enabled: true }];
+	assert.deepEqual(computeDiff(baseline, local), { added: [], removed: [], changed: [] });
+});
+
+test('non-npm transports keep exact comparison', () => {
+	const local = [{ name: 'w', source: 'github:me/whale', enabled: true }];
+	const remote = { formatVersion: 1, bundles: [{ name: 'w', source: 'github:other/whale', enabled: true }] };
+	assert.deepEqual(planConvergence(local, remote).reinstall, [{ name: 'w', source: 'github:other/whale' }]);
+	const localPath = [{ name: 'w', source: 'link:E:\\a', enabled: true }];
+	const remotePath = { formatVersion: 1, bundles: [{ name: 'w', source: 'link:E:/a', enabled: true }] };
+	assert.deepEqual(planConvergence(localPath, remotePath).reinstall, [{ name: 'w', source: 'link:E:/a' }]);
+});
+
 // --- normalizeManifest -------------------------------------------------------
 
 test('normalizeManifest rejects formatVersion other than 1', () => {
